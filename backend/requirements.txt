@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+websockets
+opencv-python
+numpy
+torch
+torchvision
+# Note: SAM 2 and MatAnyone 2 will be installed from their respective repositories later.

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+venv/
+env/
+.venv/
+
+# App Specific Ignored Data
+backend/checkpoints/*
+!backend/checkpoints/.gitkeep
+backend/cache_workspace/*
+!backend/cache_workspace/.gitkeep
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Tauri
+frontend/src-tauri/target/
+
+# OS
+.DS_Store
+Thumbs.db
