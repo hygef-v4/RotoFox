@@ -5,4 +5,5 @@ opencv-python
 numpy
 torch
 torchvision
+ffmpeg-python
 # Note: SAM 2 and MatAnyone 2 will be installed from their respective repositories later.

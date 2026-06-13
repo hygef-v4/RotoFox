@@ -13,6 +13,11 @@ backend/checkpoints/*
 !backend/checkpoints/.gitkeep
 backend/cache_workspace/*
 !backend/cache_workspace/.gitkeep
+pretrained_models/
+scripts/pretrained_models/
+backend/third_party/
+*.pt
+*.pth  
 
 # Node
 node_modules/

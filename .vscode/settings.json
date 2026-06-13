@@ -1,1 +1,7 @@
-{}
+{
+    "python.defaultInterpreterPath": "backend\\.venv\\Scripts\\python.exe",
+    "python.analysis.extraPaths": [
+        "backend/third_party/segment-anything-2",
+        "backend/third_party/MatAnyone2"
+    ]
+}
