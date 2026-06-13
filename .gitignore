@@ -31,3 +31,6 @@ frontend/src-tauri/target/
 # OS
 .DS_Store
 Thumbs.db
+
+# Archives
+*.zip
