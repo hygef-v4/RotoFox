@@ -1,8 +1,7 @@
 import React, { useRef } from 'react';
 import { Upload, Download, MousePointer2, Plus, Minus, Settings, Play, Square } from 'lucide-react';
 import logo from '../../assets/rotofox_logo.png';
-
-const Toolbar = ({ clickMode, setClickMode, onVideoImport, onExportClick, onClearClicks }) => {
+const Toolbar = ({ clickMode, setClickMode, onVideoImport, onExportClick, onClearClicks, viewMode, setViewMode }) => {
   const fileInputRef = useRef(null);
 
   const handleImportClick = () => {
@@ -72,6 +71,24 @@ const Toolbar = ({ clickMode, setClickMode, onVideoImport, onExportClick, onClea
           >
             <MousePointer2 size={16} />
             Clear Clicks
+          </button>
+        </div>
+      </div>
+
+      <div className="mb-6">
+        <h3 className="text-sm font-semibold text-textSecondary uppercase tracking-wider mb-3">View Mode</h3>
+        <div className="flex bg-[#222] rounded-md p-1 border border-[#333]">
+          <button
+            onClick={() => setViewMode('overlay')}
+            className={`flex-1 py-1.5 text-xs font-semibold rounded-sm transition-colors ${viewMode === 'overlay' ? 'bg-orange-500 text-white' : 'text-textSecondary hover:text-textPrimary'}`}
+          >
+            Overlay
+          </button>
+          <button
+            onClick={() => setViewMode('isolated')}
+            className={`flex-1 py-1.5 text-xs font-semibold rounded-sm transition-colors ${viewMode === 'isolated' ? 'bg-orange-500 text-white' : 'text-textSecondary hover:text-textPrimary'}`}
+          >
+            Isolated
           </button>
         </div>
       </div>

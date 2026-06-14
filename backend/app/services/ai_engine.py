@@ -6,6 +6,7 @@ import base64
 from PIL import Image
 import numpy as np
 import torch
+import cv2
 from pathlib import Path
 from app.core.engine_state import EngineState
 from app.services.memory_manager import MemoryManager
@@ -141,7 +142,8 @@ class AIEngine:
     def _mask_to_base64(self, mask_np):
         h, w = mask_np.shape
         rgba = np.zeros((h, w, 4), dtype=np.uint8)
-        rgba[mask_np, :] = [255, 0, 0, 128]  # Red, 50% opacity
+        # White color, fully opaque where mask is True, transparent where False
+        rgba[mask_np, :] = [255, 255, 255, 255]
         
         img = Image.fromarray(rgba, 'RGBA')
         buf = io.BytesIO()
@@ -154,6 +156,10 @@ class AIEngine:
             return
 
         print(f"AI Engine: Starting propagation for {self.state.total_frames} frames...")
+        video_dir = CacheManager.get_video_dir(self.video_id)
+        mask_dir = video_dir / "masks"
+        mask_dir.mkdir(exist_ok=True)
+        
         try:
             # We iterate the generator directly to support real-time streaming of masks and progress
             if hasattr(self, 'device') and self.device.type == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
@@ -168,6 +174,11 @@ class AIEngine:
                         
                         # Convert the mask to base64
                         mask = (out_mask_logits[0] > 0.0).cpu().numpy().squeeze()
+                        
+                        # Save mask to disk for export
+                        mask_filename = f"{out_frame_idx:05d}.png"
+                        cv2.imwrite(str(mask_dir / mask_filename), (mask.astype(np.uint8) * 255))
+                        
                         b64_mask = self._mask_to_base64(mask)
                         
                         self.state.current_frame = out_frame_idx
@@ -196,6 +207,11 @@ class AIEngine:
                     
                     # Convert the mask to base64
                     mask = (out_mask_logits[0] > 0.0).cpu().numpy().squeeze()
+                    
+                    # Save mask to disk for export
+                    mask_filename = f"{out_frame_idx:05d}.png"
+                    cv2.imwrite(str(mask_dir / mask_filename), (mask.astype(np.uint8) * 255))
+                        
                     b64_mask = self._mask_to_base64(mask)
                     
                     self.state.current_frame = out_frame_idx
@@ -226,24 +242,96 @@ class AIEngine:
             await run_in_threadpool(MemoryManager.cleanup)
 
     async def run_export(self, websocket, settings: dict):
-        format = settings.get("format", "mp4")
-        total_frames = settings.get("total_frames", 100)
-        print(f"AI Engine: Exporting project in {format}...")
+        export_format = settings.get("format", "mp4")
+        export_type = settings.get("type", "alpha")
+        bg_color_str = settings.get("bg_color", "green")
+        total_frames = settings.get("total_frames", self.state.total_frames or 100)
+        
+        # Parse background color for Solid mode (OpenCV uses BGR)
+        bg_colors = {
+            "green": [0, 255, 0],
+            "blue": [255, 0, 0],
+            "black": [0, 0, 0],
+            "white": [255, 255, 255]
+        }
+        bgr_color = bg_colors.get(bg_color_str, [0, 255, 0])
+        
+        if not self.video_id:
+            await websocket.send_json({"status": "export_error", "message": "No video loaded."})
+            return
+            
+        output_filename = f"rotofox_export_{int(time.time())}.{export_format}"
+        output_path = str(CacheManager.get_video_dir(self.video_id).parent / output_filename)
+        
+        video_dir = CacheManager.get_video_dir(self.video_id)
+        mask_dir = video_dir / "masks"
+        
+        print(f"AI Engine: Exporting project to {output_path} (Type: {export_type}, BG: {bg_color_str})...")
         
         try:
-            for progress in range(0, 101, 20):
-                await asyncio.sleep(1.0)
-                await websocket.send_json({
-                    "status": "export_progress",
-                    "progress": progress,
-                    "message": f"Compositing video via FFmpeg..."
-                })
+            # Assume 25 FPS as default for export
+            fps = 25.0
+            
+            if export_format == "webm":
+                fourcc = cv2.VideoWriter_fourcc(*'vp80')
+            else:
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                
+            writer = cv2.VideoWriter(output_path, fourcc, fps, (self.video_width, self.video_height))
+            
+            for i in range(total_frames):
+                frame_path = video_dir / f"{i:05d}.jpg"
+                mask_path = mask_dir / f"{i:05d}.png"
+                
+                # Default frame is black if missing
+                out_frame = np.zeros((self.video_height, self.video_width, 3), dtype=np.uint8)
+                
+                if frame_path.exists():
+                    img = cv2.imread(str(frame_path))
+                    if img is not None:
+                        out_frame = img
+
+                # Read mask
+                mask = np.zeros((self.video_height, self.video_width), dtype=np.uint8)
+                if mask_path.exists():
+                    m = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+                    if m is not None:
+                        mask = m
+
+                # Render logic
+                if export_type == "alpha":
+                    # Grayscale mask to BGR (black and white video)
+                    out_frame = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+                elif export_type == "solid":
+                    # Fill background with solid color, keep object
+                    out_frame[mask < 127] = bgr_color
+                else:
+                    # Video Overlay: add red tint at 50% opacity
+                    overlay = out_frame.copy()
+                    overlay[mask > 127] = [0, 0, 255] # BGR for red
+                    out_frame = cv2.addWeighted(overlay, 0.5, out_frame, 0.5, 0)
+                
+                writer.write(out_frame)
+                
+                # Progress update
+                if i % max(1, total_frames // 20) == 0:
+                    progress = int((i / max(total_frames, 1)) * 100)
+                    await websocket.send_json({
+                        "status": "export_progress",
+                        "progress": progress,
+                        "message": f"Rendering frame {i}/{total_frames}..."
+                    })
+                    await asyncio.sleep(0.001)
+
+            writer.release()
             
             await websocket.send_json({
                 "status": "export_completed",
-                "file_path": f"cache_workspace/rotofox_export_{int(time.time())}.{format}"
+                "file_path": str(Path(output_path).resolve())
             })
             print("AI Engine: Export completed.")
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             print(f"AI Engine Export Error: {e}")
             await websocket.send_json({"status": "export_error", "message": str(e)})

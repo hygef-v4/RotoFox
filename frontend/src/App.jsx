@@ -24,7 +24,11 @@ function App() {
   // Export overlay states
   const [showExportModal, setShowExportModal] = useState(false);
   const [exportFormat, setExportFormat] = useState('mp4');
-  const [exportType, setExportType] = useState('alpha');
+  const [exportType, setExportType] = useState('solid');
+  const [exportBgColor, setExportBgColor] = useState('green'); // green, blue, black, white
+
+  // View Mode
+  const [viewMode, setViewMode] = useState('overlay'); // overlay, isolated
 
   const {
     isConnected,
@@ -42,10 +46,13 @@ function App() {
     exportMessage,
     exportFilePath,
     startExport,
-    resetExport
+    resetExport,
+    requestMask // Will add this next
   } = useAIEngine();
 
   const [backendFramesCount, setBackendFramesCount] = useState(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [isBackendReady, setIsBackendReady] = useState(false);
 
   // Sync current frame from AI tracking progress updates
   useEffect(() => {
@@ -60,6 +67,8 @@ function App() {
     setCurrentFrame(0);
     setVideoOffsetFrame(0);
     setBackendFramesCount(null); // Reset for new video
+    setIsUploading(true);
+    setIsBackendReady(false);
     console.log("Importing video locally:", file.name);
 
     // Upload to backend for SAM 2 frame extraction + model loading
@@ -69,7 +78,9 @@ function App() {
       setBackendFramesCount(result.frames_count);
       setTotalFrames(result.frames_count);
       setTrimEnd(result.frames_count);
+      setIsBackendReady(true);
     }
+    setIsUploading(false);
   };
 
   // Sample video logic removed for production ready state
@@ -86,6 +97,10 @@ function App() {
   };
 
   const handleCanvasClick = (coords, mode) => {
+    if (isUploading || !isBackendReady) {
+      console.warn("Ignored click: Backend is still initializing the video.");
+      return;
+    }
     // Send absolute frame index (current relative frame + trim offset) to the backend
     sendClick(coords, mode, currentFrame + videoOffsetFrame);
   };
@@ -97,7 +112,11 @@ function App() {
 
   const handleSeek = (frame) => {
     if (isTracking) return;
-    setCurrentFrame(Math.max(0, Math.min(totalFrames, frame)));
+    const clamped = Math.max(0, Math.min(totalFrames, frame));
+    setCurrentFrame(clamped);
+    if (isBackendReady && requestMask) {
+      requestMask(clamped + videoOffsetFrame);
+    }
   };
 
   const handleSetTrimStart = (frame) => {
@@ -147,6 +166,8 @@ function App() {
             onVideoImport={handleVideoImport}
             onExportClick={() => setShowExportModal(true)}
             onClearClicks={handleClearClicks}
+            viewMode={viewMode}
+            setViewMode={setViewMode}
           />
         }
         canvas={
@@ -163,6 +184,8 @@ function App() {
             onFrameChange={setCurrentFrame}
             onPlayToggle={setIsPlaying}
             clearSignal={clearSignal}
+            isUploading={isUploading}
+            viewMode={viewMode}
           />
 
         }
@@ -229,28 +252,53 @@ function App() {
 
                   <div>
                     <label className="block text-xs font-semibold text-textSecondary uppercase mb-1">Render Type</label>
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-3 gap-2">
                       {[
-                        { id: 'alpha', label: 'Alpha Matte (B&W)', desc: 'High-contrast mask' },
-                        { id: 'overlay', label: 'Video Overlay', desc: 'Mask overlay on video' }
+                        { id: 'solid', label: 'Solid Color', desc: 'Isolated background' },
+                        { id: 'alpha', label: 'Alpha Matte', desc: 'B&W mask video' },
+                        { id: 'overlay', label: 'Video Overlay', desc: 'Mask on video' }
                       ].map((t) => (
                         <button
                           key={t.id}
                           type="button"
                           onClick={() => setExportType(t.id)}
-                          className={`p-3 rounded-lg border text-left transition-all ${exportType === t.id ? 'bg-orange-500/20 border-orange-500 text-orange-400' : 'bg-[#222] border-[#333] hover:border-[#444] text-textSecondary'}`}
+                          className={`p-2 rounded-lg border text-left transition-all ${exportType === t.id ? 'bg-orange-500/20 border-orange-500 text-orange-400' : 'bg-[#222] border-[#333] hover:border-[#444] text-textSecondary'}`}
                         >
-                          <div className="text-xs font-semibold text-textPrimary">{t.label}</div>
-                          <div className="text-[10px] text-textSecondary mt-0.5">{t.desc}</div>
+                          <div className="text-[11px] font-semibold text-textPrimary">{t.label}</div>
+                          <div className="text-[9px] text-textSecondary mt-0.5 leading-tight">{t.desc}</div>
                         </button>
                       ))}
                     </div>
                   </div>
+
+                  {exportType === 'solid' && (
+                    <div className="animate-fade-in">
+                      <label className="block text-xs font-semibold text-textSecondary uppercase mb-1">Background Color</label>
+                      <div className="grid grid-cols-4 gap-2">
+                        {[
+                          { id: 'green', color: '#00FF00', label: 'Green' },
+                          { id: 'blue', color: '#0000FF', label: 'Blue' },
+                          { id: 'black', color: '#000000', label: 'Black' },
+                          { id: 'white', color: '#FFFFFF', label: 'White' }
+                        ].map((c) => (
+                          <button
+                            key={c.id}
+                            type="button"
+                            onClick={() => setExportBgColor(c.id)}
+                            className={`py-1.5 rounded-md border flex flex-col items-center justify-center transition-all ${exportBgColor === c.id ? 'border-orange-500 bg-[#333]' : 'border-[#333] hover:border-[#555] bg-[#222]'}`}
+                          >
+                            <div className="w-3 h-3 rounded-full border border-[#555] mb-1" style={{ backgroundColor: c.color }}></div>
+                            <div className="text-[9px] font-semibold text-textSecondary">{c.label}</div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <button
                   type="button"
-                  onClick={() => startExport({ format: exportFormat, type: exportType, total_frames: totalFrames })}
+                  onClick={() => startExport({ format: exportFormat, type: exportType, bg_color: exportBgColor, total_frames: totalFrames })}
                   className="w-full mt-4 bg-orange-500 hover:bg-orange-600 text-white font-semibold py-2.5 rounded-lg transition-colors flex items-center justify-center gap-2"
                 >
                   Start Exporting

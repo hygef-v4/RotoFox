@@ -64,8 +64,47 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_json({"status": "error", "message": str(e)})
                 
             elif action == "export":
-                settings = data.get("settings", {})
-                asyncio.create_task(ai_engine.run_export(websocket, settings))
+                # Data is now sent flat from frontend
+                asyncio.create_task(ai_engine.run_export(websocket, data))
+
+            elif action == "get_mask":
+                frame_idx = data.get("frame_idx", 0)
+                try:
+                    from app.services.cache_manager import CacheManager
+                    import cv2
+                    import numpy as np
+                    from PIL import Image
+                    import io
+                    import base64
+                    
+                    mask_dir = CacheManager.get_video_dir(ai_engine.video_id) / "masks"
+                    mask_path = mask_dir / f"{frame_idx:05d}.png"
+                    
+                    if mask_path.exists():
+                        # Read the grayscale mask from disk
+                        m = await run_in_threadpool(cv2.imread, str(mask_path), cv2.IMREAD_GRAYSCALE)
+                        if m is not None:
+                            # Convert to transparent white mask exactly like _mask_to_base64 does
+                            rgba = np.zeros((m.shape[0], m.shape[1], 4), dtype=np.uint8)
+                            rgba[m > 127, :] = [255, 255, 255, 255]
+                            img = Image.fromarray(rgba, 'RGBA')
+                            buf = io.BytesIO()
+                            img.save(buf, format='PNG')
+                            b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                            
+                            await websocket.send_json({
+                                "status": "mask_update",
+                                "frame": frame_idx,
+                                "mask_base64": b64
+                            })
+                    else:
+                        await websocket.send_json({
+                            "status": "mask_update",
+                            "frame": frame_idx,
+                            "mask_base64": None
+                        })
+                except Exception as e:
+                    print(f"Error fetching mask: {e}")
                 
     except WebSocketDisconnect:
         print("Client disconnected from Editor UI")

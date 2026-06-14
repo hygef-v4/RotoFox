@@ -78,8 +78,10 @@ export function useAIEngine() {
         } else if (data.status === "export_error") {
           setExportStatus("error");
           setExportMessage(data.message || "Failed to export");
-        } else if (data.mask_base64) {
-          setMaskImage(data.mask_base64);
+        } else if (data.status === "mask_update" || data.status === "received" || data.status === "tracking") {
+          if (data.mask_base64 !== undefined) {
+            setMaskImage(data.mask_base64);
+          }
         }
       };
 
@@ -150,11 +152,24 @@ export function useAIEngine() {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       setExportStatus("rendering");
       setExportProgress(0);
-      setExportMessage("Starting export...");
-      setExportFilePath("");
+      setExportMessage("Initializing export...");
+      
       wsRef.current.send(JSON.stringify({
         action: 'export',
-        settings
+        video_id: videoId || 'unknown',
+        format: settings.format,
+        type: settings.type,
+        bg_color: settings.bg_color,
+        total_frames: settings.total_frames
+      }));
+    }
+  }, [videoId]);
+
+  const requestMask = useCallback((frameIdx) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        action: 'get_mask',
+        frame_idx: frameIdx
       }));
     }
   }, []);
@@ -207,13 +222,12 @@ export function useAIEngine() {
     startTracking,
     cancelTracking,
     uploadVideo,
-    
-    // Export values
     exportProgress,
     exportStatus,
     exportMessage,
     exportFilePath,
     startExport,
-    resetExport
+    resetExport,
+    requestMask
   };
-}
+};

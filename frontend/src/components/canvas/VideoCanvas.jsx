@@ -15,6 +15,8 @@ const VideoCanvas = ({
   onFrameChange,
   onPlayToggle,
   clearSignal,           // increments from parent to trigger clearing all dots
+  isUploading = false,
+  viewMode = 'overlay',  // overlay, isolated
 }) => {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
@@ -46,10 +48,28 @@ const VideoCanvas = ({
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     // 1. Mask overlay from AI backend
-    if (maskImageObjRef.current) {
-      ctx.globalAlpha = 0.5;
-      ctx.drawImage(maskImageObjRef.current, 0, 0, canvas.width, canvas.height);
-      ctx.globalAlpha = 1.0;
+    if (viewMode === 'isolated') {
+      if (videoRef.current && videoRef.current.readyState >= 2) {
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+      }
+      if (maskImageObjRef.current) {
+        ctx.globalCompositeOperation = 'destination-in';
+        ctx.drawImage(maskImageObjRef.current, 0, 0, canvas.width, canvas.height);
+        ctx.globalCompositeOperation = 'source-over';
+      }
+    } else {
+      // Overlay mode
+      if (maskImageObjRef.current) {
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.drawImage(maskImageObjRef.current, 0, 0, canvas.width, canvas.height);
+        
+        ctx.globalCompositeOperation = 'source-in';
+        ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        ctx.globalCompositeOperation = 'source-over';
+      }
     }
 
     // 2. Committed selection boxes
@@ -111,7 +131,7 @@ const VideoCanvas = ({
       ctx.fillStyle = '#ffffff';
       ctx.fill();
     });
-  }, []); // stable: only reads refs
+  }, [viewMode]); // Re-draw when view mode changes
 
   // ── Clear all points when clearSignal changes ─────────────────────────────
   useEffect(() => {
@@ -183,6 +203,19 @@ const VideoCanvas = ({
     };
     img.src = `data:image/png;base64,${maskImageBase64}`;
   }, [maskImageBase64, drawCanvas]);
+
+  // Re-draw canvas constantly in isolated mode to keep video frame updated while playing
+  useEffect(() => {
+    if (viewMode === 'isolated' && isPlaying) {
+      let animId;
+      const loop = () => {
+        drawCanvas();
+        animId = requestAnimationFrame(loop);
+      };
+      animId = requestAnimationFrame(loop);
+      return () => cancelAnimationFrame(animId);
+    }
+  }, [viewMode, isPlaying, drawCanvas]);
 
   // Clear live drag on mode switch
   useEffect(() => {
@@ -285,11 +318,15 @@ const VideoCanvas = ({
         <video
           ref={videoRef}
           src={videoUrl}
-          className="absolute inset-0 w-full h-full object-contain pointer-events-none select-none"
+          className={`absolute inset-0 w-full h-full object-contain pointer-events-none select-none ${viewMode === 'isolated' ? 'opacity-0' : ''}`}
           controls={false}
           muted
           loop={false}
           onLoadedMetadata={handleLoadedMetadata}
+          onSeeked={() => {
+            // Need to re-draw canvas when video frame seeks, especially for isolated mode
+            drawCanvas();
+          }}
         />
       ) : (
         <div className="absolute inset-0 flex flex-col items-center justify-center text-textSecondary/50 pointer-events-none select-none">
@@ -301,8 +338,8 @@ const VideoCanvas = ({
       {/* Canvas: mask + dots + drag box */}
       <canvas
         ref={canvasRef}
-        width={1280}
-        height={720}
+        width={totalFrames ? videoRef.current?.videoWidth || 1280 : 1280}
+        height={totalFrames ? videoRef.current?.videoHeight || 720 : 720}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
@@ -315,7 +352,7 @@ const VideoCanvas = ({
       />
 
       {/* HUD: show current mode and point count */}
-      {videoUrl && (
+      {videoUrl && !isUploading && (
         <div className="absolute bottom-2 right-2 z-20 flex items-center gap-2 bg-black/60 backdrop-blur-sm px-2 py-1 rounded text-[10px] font-mono text-textSecondary pointer-events-none select-none">
           <span className={
             clickMode === 'add' ? 'text-green-400' :
@@ -327,6 +364,15 @@ const VideoCanvas = ({
           {clickPointsRef.current.length > 0 && (
             <span>{clickPointsRef.current.length} pts</span>
           )}
+        </div>
+      )}
+
+      {/* Loading Overlay */}
+      {isUploading && (
+        <div className="absolute inset-0 z-30 bg-black/50 backdrop-blur-sm flex flex-col items-center justify-center text-orange-400 pointer-events-none select-none">
+          <div className="w-10 h-10 border-4 border-orange-500/20 border-t-orange-500 rounded-full animate-spin mb-3"></div>
+          <span className="font-mono text-sm font-semibold tracking-wider">INITIALIZING SAM 2...</span>
+          <span className="text-[10px] text-textSecondary mt-1">Extracting frames and loading models</span>
         </div>
       )}
     </div>
