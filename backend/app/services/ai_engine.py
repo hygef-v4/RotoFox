@@ -102,7 +102,7 @@ class AIEngine:
                         frame_idx=frame_idx,
                         obj_id=self.obj_id,
                         points=points,
-                        labels=labels,
+                        labels=labels
                     )
             else:
                 _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
@@ -110,7 +110,7 @@ class AIEngine:
                     frame_idx=frame_idx,
                     obj_id=self.obj_id,
                     points=points,
-                    labels=labels,
+                    labels=labels
                 )
         elif mode == 'box':
             x1, y1, x2, y2 = coords[0] * width, coords[1] * height, coords[2] * width, coords[3] * height
@@ -122,14 +122,14 @@ class AIEngine:
                         inference_state=self.inference_state,
                         frame_idx=frame_idx,
                         obj_id=self.obj_id,
-                        box=box,
+                        box=box
                     )
             else:
                 _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
                     inference_state=self.inference_state,
                     frame_idx=frame_idx,
                     obj_id=self.obj_id,
-                    box=box,
+                    box=box
                 )
         else:
             raise ValueError("Invalid click mode")

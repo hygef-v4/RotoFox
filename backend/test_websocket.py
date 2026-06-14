@@ -43,7 +43,7 @@ async def test():
             while True:
                 resp = await websocket.recv()
                 data = json.loads(resp)
-                print("Track update:", data.get("status"), "Frame:", data.get("frame"), "Progress:", data.get("progress"))
+                print("Track update raw:", data)
                 if data.get("status") in ["completed", "error", "cancelled"]:
                     break
         except Exception as e:

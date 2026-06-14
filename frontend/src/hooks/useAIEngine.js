@@ -78,8 +78,12 @@ export function useAIEngine() {
         } else if (data.status === "export_error") {
           setExportStatus("error");
           setExportMessage(data.message || "Failed to export");
+        } else if (data.status === "error") {
+          console.error("Backend error:", data.message);
+          alert("AI Engine Error: " + data.message);
         } else if (data.status === "mask_update" || data.status === "received" || data.status === "tracking") {
           if (data.mask_base64 !== undefined) {
+            console.log("Received mask base64, length:", data.mask_base64 ? data.mask_base64.length : 0);
             setMaskImage(data.mask_base64);
           }
         }

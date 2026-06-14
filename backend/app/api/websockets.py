@@ -62,6 +62,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 except Exception as e:
                     print(f"Error handling click: {e}")
                     await websocket.send_json({"status": "error", "message": str(e)})
+
+            elif action == "clear_clicks":
+                try:
+                    if hasattr(ai_engine, "inference_state") and getattr(ai_engine, "frames_dir", None):
+                        # Reset SAM 2 state to clear all points
+                        ai_engine.inference_state = ai_engine.predictor.init_state(video_path=ai_engine.frames_dir)
+                        # We also send an empty mask back so the frontend clears visually if it didn't already
+                        await websocket.send_json({
+                            "status": "mask_update",
+                            "frame": data.get("frame_idx", 0),
+                            "mask_base64": None
+                        })
+                except Exception as e:
+                    print(f"Error clearing clicks: {e}")
                 
             elif action == "export":
                 # Data is now sent flat from frontend
