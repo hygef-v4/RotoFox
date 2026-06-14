@@ -54,6 +54,8 @@ function App() {
   const [isUploading, setIsUploading] = useState(false);
   const [isBackendReady, setIsBackendReady] = useState(false);
 
+
+
   // Sync current frame from AI tracking progress updates
   useEffect(() => {
     if (isTracking && progressData.currentFrame !== currentFrame) {

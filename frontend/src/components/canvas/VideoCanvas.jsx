@@ -160,7 +160,7 @@ const VideoCanvas = ({
     const effectiveFps = (totalFrames && video.duration) ? (totalFrames / video.duration) : 30;
     
     const targetTime = (currentFrame + videoOffsetFrame) / effectiveFps;
-    if (Math.abs(video.currentTime - targetTime) > 0.05) {
+    if (Math.abs(video.currentTime - targetTime) > 0.01) {
       video.currentTime = targetTime;
     }
   }, [currentFrame, videoOffsetFrame, isPlaying, totalFrames]);
