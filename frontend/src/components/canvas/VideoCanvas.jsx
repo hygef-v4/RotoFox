@@ -17,6 +17,7 @@ const VideoCanvas = ({
   clearSignal,           // increments from parent to trigger clearing all dots
   isUploading = false,
   viewMode = 'overlay',  // overlay, isolated
+  onRequestMask,         // called during playback to sync mask with frame
 }) => {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
@@ -50,28 +51,35 @@ const VideoCanvas = ({
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+    // 0. Always draw the video frame on the canvas first (ensures sync with mask)
+    if (videoRef.current && videoRef.current.readyState >= 2) {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+    }
+
     // 1. Mask overlay from AI backend
     if (viewMode === 'isolated') {
-      if (videoRef.current && videoRef.current.readyState >= 2) {
-        ctx.globalCompositeOperation = 'source-over';
-        ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-      }
       if (maskImageObjRef.current) {
         ctx.globalCompositeOperation = 'destination-in';
         ctx.drawImage(maskImageObjRef.current, 0, 0, canvas.width, canvas.height);
         ctx.globalCompositeOperation = 'source-over';
       }
     } else {
-      // Overlay mode
+      // Overlay mode - draw red tinted mask on top of video
       if (maskImageObjRef.current) {
+        // Draw mask to a temp area, then tint it
         ctx.globalCompositeOperation = 'source-over';
-        ctx.drawImage(maskImageObjRef.current, 0, 0, canvas.width, canvas.height);
-        
-        ctx.globalCompositeOperation = 'source-in';
-        ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        
-        ctx.globalCompositeOperation = 'source-over';
+        // Save the current canvas (video frame)
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = canvas.width;
+        tempCanvas.height = canvas.height;
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCtx.drawImage(maskImageObjRef.current, 0, 0, canvas.width, canvas.height);
+        tempCtx.globalCompositeOperation = 'source-in';
+        tempCtx.fillStyle = 'rgba(255, 0, 0, 0.5)';
+        tempCtx.fillRect(0, 0, canvas.width, canvas.height);
+        // Composite the tinted mask onto main canvas
+        ctx.drawImage(tempCanvas, 0, 0);
       }
     }
 
@@ -181,9 +189,13 @@ const VideoCanvas = ({
   }, [currentFrame, videoOffsetFrame, isPlaying, totalFrames]);
 
   // ── rAF loop while playing ────────────────────────────────────────────────
+  const onRequestMaskRef = useRef(onRequestMask);
+  useEffect(() => { onRequestMaskRef.current = onRequestMask; }, [onRequestMask]);
+
   useEffect(() => {
     if (!isPlaying) return;
     let animId;
+    let lastFrame = -1;
     const loop = () => {
       const video = videoRef.current;
       if (!video) return;
@@ -195,8 +207,15 @@ const VideoCanvas = ({
         onPlayToggle(false);
         onFrameChange(0);
       } else if (frame >= 0) {
-        onFrameChange(frame);
+        if (frame !== lastFrame) {
+          lastFrame = frame;
+          onFrameChange(frame);
+          // Sync mask from cache during playback
+          onRequestMaskRef.current?.(frame + videoOffsetFrame);
+        }
       }
+      // Always redraw canvas to sync video frame with mask
+      drawCanvas();
       animId = requestAnimationFrame(loop);
     };
     animId = requestAnimationFrame(loop);
@@ -205,32 +224,34 @@ const VideoCanvas = ({
   }, [isPlaying, totalFrames, videoOffsetFrame, onFrameChange, onPlayToggle]);
 
   // ── Mask image ────────────────────────────────────────────────────────────
+  const imageCacheRef = useRef(new Map()); // base64 -> Image obj
+
   useEffect(() => {
     if (!maskImageBase64) {
       maskImageObjRef.current = null;
       drawCanvas();
       return;
     }
+
+    // Check if we already created an Image for this base64
+    if (imageCacheRef.current.has(maskImageBase64)) {
+      maskImageObjRef.current = imageCacheRef.current.get(maskImageBase64);
+      drawCanvas();
+      return;
+    }
+
     const img = new Image();
     img.onload = () => {
+      // Cache it for instant retrieval next time
+      imageCacheRef.current.set(maskImageBase64, img);
       maskImageObjRef.current = img;
       drawCanvas();
     };
     img.src = `data:image/png;base64,${maskImageBase64}`;
   }, [maskImageBase64, drawCanvas]);
 
-  // Re-draw canvas constantly in isolated mode to keep video frame updated while playing
-  useEffect(() => {
-    if (viewMode === 'isolated' && isPlaying) {
-      let animId;
-      const loop = () => {
-        drawCanvas();
-        animId = requestAnimationFrame(loop);
-      };
-      animId = requestAnimationFrame(loop);
-      return () => cancelAnimationFrame(animId);
-    }
-  }, [viewMode, isPlaying, drawCanvas]);
+  // Re-draw canvas on seek to sync video frame
+  // (no longer need isolated-only rAF since we always draw video on canvas)
 
   // Clear live drag on mode switch
   useEffect(() => {
@@ -333,7 +354,7 @@ const VideoCanvas = ({
         <video
           ref={videoRef}
           src={videoUrl}
-          className={`absolute inset-0 w-full h-full object-contain pointer-events-none select-none ${viewMode === 'isolated' ? 'opacity-0' : ''}`}
+          className="absolute inset-0 w-full h-full object-contain pointer-events-none select-none opacity-0"
           controls={false}
           muted
           loop={false}

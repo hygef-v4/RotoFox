@@ -47,7 +47,8 @@ function App() {
     exportFilePath,
     startExport,
     resetExport,
-    requestMask // Will add this next
+    requestMask,
+    clearMaskCache
   } = useAIEngine();
 
   const [backendFramesCount, setBackendFramesCount] = useState(null);
@@ -71,6 +72,7 @@ function App() {
     setBackendFramesCount(null); // Reset for new video
     setIsUploading(true);
     setIsBackendReady(false);
+    clearMaskCache();  // Flush cached masks from previous video
     console.log("Importing video locally:", file.name);
 
     // Upload to backend for SAM 2 frame extraction + model loading
@@ -150,6 +152,7 @@ function App() {
 
   const handleClearClicks = () => {
     setClearSignal(s => s + 1);
+    clearMaskCache();  // Flush cached masks when clearing points
   };
 
 
@@ -189,6 +192,7 @@ function App() {
             clearSignal={clearSignal}
             isUploading={isUploading}
             viewMode={viewMode}
+            onRequestMask={requestMask}
           />
 
         }

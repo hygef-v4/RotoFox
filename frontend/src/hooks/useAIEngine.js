@@ -26,6 +26,7 @@ export function useAIEngine() {
   const [exportFilePath, setExportFilePath] = useState("");
 
   const wsRef = useRef(null);
+  const maskCacheRef = useRef(new Map());  // frame_idx -> base64 mask
 
   useEffect(() => {
     let reconnectTimer = null;
@@ -68,6 +69,7 @@ export function useAIEngine() {
             progress: data.progress
           }));
           if (data.mask_base64) {
+            maskCacheRef.current.set(data.frame, data.mask_base64);
             setMaskImage(data.mask_base64);
           }
         } else if (data.status === "completed" || data.status === "cancelled") {
@@ -88,7 +90,10 @@ export function useAIEngine() {
           console.error("AI Engine Error:", data.message);
         } else if (data.status === "mask_update" || data.status === "received") {
           if (data.mask_base64 !== undefined) {
-            console.log("Received mask base64, length:", data.mask_base64 ? data.mask_base64.length : 0);
+            const frameIdx = data.frame ?? data.echo?.frame_idx;
+            if (frameIdx !== undefined && data.mask_base64) {
+              maskCacheRef.current.set(frameIdx, data.mask_base64);
+            }
             setMaskImage(data.mask_base64);
           }
         }
@@ -186,12 +191,24 @@ export function useAIEngine() {
   }, [videoId]);
 
   const requestMask = useCallback((frameIdx) => {
+    // Check local cache first (instant, no network)
+    const cached = maskCacheRef.current.get(frameIdx);
+    if (cached) {
+      setMaskImage(cached);
+      return;
+    }
+    // Cache miss - fetch from backend
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         action: 'get_mask',
         frame_idx: frameIdx
       }));
     }
+  }, []);
+
+  const clearMaskCache = useCallback(() => {
+    maskCacheRef.current.clear();
+    setMaskImage(null);
   }, []);
 
   const resetExport = useCallback(() => {
@@ -268,6 +285,7 @@ export function useAIEngine() {
     exportFilePath,
     startExport,
     resetExport,
-    requestMask
+    requestMask,
+    clearMaskCache
   };
 };
