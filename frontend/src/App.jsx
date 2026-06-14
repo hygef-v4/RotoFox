@@ -1,10 +1,20 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import MainLayout from './components/layout/MainLayout';
 import Toolbar from './components/sidebar/Toolbar';
 import VideoCanvas from './components/canvas/VideoCanvas';
 import TimelineController from './components/timeline/TimelineController';
 import { useAIEngine } from './hooks/useAIEngine';
 import { X, CheckCircle, AlertCircle, Download, Film } from 'lucide-react';
+
+const OBJECT_COLORS = [
+  '#FF3B30', // Red
+  '#007AFF', // Blue
+  '#34C759', // Green
+  '#FF9500', // Orange
+  '#AF52DE', // Purple
+  '#5AC8FA', // Cyan
+  '#FFCC00', // Yellow
+];
 
 function App() {
   const [clickMode, setClickMode] = useState('add');
@@ -30,6 +40,11 @@ function App() {
   // View Mode
   const [viewMode, setViewMode] = useState('overlay'); // overlay, isolated
 
+  // Multi-object tracking state
+  const [objects, setObjects] = useState([{ id: 1, color: OBJECT_COLORS[0], name: 'Object 1' }]);
+  const [activeObjectId, setActiveObjectId] = useState(1);
+  const [deleteObjectSignal, setDeleteObjectSignal] = useState(null);
+
   const {
     isConnected,
     isTracking,
@@ -48,7 +63,9 @@ function App() {
     startExport,
     resetExport,
     requestMask,
-    clearMaskCache
+    clearMaskCache,
+    clearBackendState,
+    removeObject
   } = useAIEngine();
 
   const [backendFramesCount, setBackendFramesCount] = useState(null);
@@ -100,15 +117,15 @@ function App() {
     console.log(`Video loaded: ${actualFrames} frames, duration ${metadata.duration.toFixed(2)}s`);
   };
 
-  const handleCanvasClick = (pointsData, boxesData) => {
+  const handleCanvasClick = useCallback((pointsData, boxesData) => {
     console.log(`handleCanvasClick: points=${pointsData.length}, boxes=${boxesData.length}, isUploading=${isUploading}, isBackendReady=${isBackendReady}`);
     if (isUploading || !isBackendReady) {
       console.warn("Ignored click: Backend is still initializing the video.");
       return;
     }
     // Send absolute frame index (current relative frame + trim offset) to the backend
-    sendClick(pointsData, boxesData, currentFrame + videoOffsetFrame);
-  };
+    sendClick(pointsData, boxesData, currentFrame + videoOffsetFrame, activeObjectId);
+  }, [currentFrame, videoOffsetFrame, isUploading, isBackendReady, sendClick, activeObjectId]);
 
   const handlePlayToggle = (val) => {
     if (isTracking) return;
@@ -153,8 +170,29 @@ function App() {
   const handleClearClicks = () => {
     setClearSignal(s => s + 1);
     clearMaskCache();  // Flush cached masks when clearing points
+    clearBackendState(currentFrame + videoOffsetFrame); // Tell backend to reset SAM 2 inference state
   };
 
+  const handleAddObject = () => {
+    const newId = objects.length > 0 ? Math.max(...objects.map(o => o.id)) + 1 : 1;
+    const color = OBJECT_COLORS[(newId - 1) % OBJECT_COLORS.length];
+    setObjects(prev => [...prev, { id: newId, color, name: `Object ${newId}` }]);
+    setActiveObjectId(newId);
+  };
+
+  const handleDeleteObject = (e, id) => {
+    e.stopPropagation();
+    if (objects.length <= 1) return;
+    
+    removeObject(id, currentFrame + videoOffsetFrame);
+    const newObjects = objects.filter(o => o.id !== id);
+    setObjects(newObjects);
+    if (activeObjectId === id) {
+      setActiveObjectId(newObjects.length > 0 ? newObjects[0].id : null);
+    }
+    // Only delete points for this object on the canvas
+    setDeleteObjectSignal({ id, t: Date.now() });
+  };
 
   return (
     <>
@@ -174,6 +212,11 @@ function App() {
             onClearClicks={handleClearClicks}
             viewMode={viewMode}
             setViewMode={setViewMode}
+            objects={objects}
+            activeObjectId={activeObjectId}
+            setActiveObjectId={setActiveObjectId}
+            handleAddObject={handleAddObject}
+            handleDeleteObject={handleDeleteObject}
           />
         }
         canvas={
@@ -193,6 +236,9 @@ function App() {
             isUploading={isUploading}
             viewMode={viewMode}
             onRequestMask={requestMask}
+            objects={objects}
+            activeObjectId={activeObjectId}
+            deleteObjectSignal={deleteObjectSignal}
           />
 
         }
@@ -205,7 +251,7 @@ function App() {
             trimStart={trimStart}
             trimEnd={trimEnd}
             onPlayToggle={() => handlePlayToggle()}
-            onTrackForward={() => startTracking(totalFrames)}
+            onTrackForward={() => startTracking(totalFrames, currentFrame + videoOffsetFrame)}
             onCancelTracking={cancelTracking}
             onSetTrimStart={handleSetTrimStart}
             onSetTrimEnd={handleSetTrimEnd}

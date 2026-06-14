@@ -137,11 +137,12 @@ export function useAIEngine() {
     };
   }, []);
 
-  const sendClick = useCallback((pointsData, boxesData, frameIdx) => {
+  const sendClick = useCallback((pointsData, boxesData, frameIdx, objId = 1) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       const payload = {
         action: 'click',
         frame_idx: frameIdx,
+        obj_id: objId,
         points: pointsData.map(p => [p.x, p.y]),
         labels: pointsData.map(p => p.mode === 'add' ? 1 : 0),
         box: boxesData.length > 0 ? [boxesData[0].x1, boxesData[0].y1, boxesData[0].x2, boxesData[0].y2] : null
@@ -153,13 +154,14 @@ export function useAIEngine() {
     }
   }, []);
 
-  const startTracking = useCallback((customFrames) => {
+  const startTracking = useCallback((customFrames, startFrame) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       setIsTracking(true);
       wsRef.current.send(JSON.stringify({
         action: 'track_forward',
         video_id: videoId || 'unknown',
-        total_frames: customFrames || progressData.totalFrames
+        total_frames: customFrames || progressData.totalFrames,
+        start_frame: startFrame
       }));
     }
   }, [videoId, progressData.totalFrames]);
@@ -209,6 +211,25 @@ export function useAIEngine() {
   const clearMaskCache = useCallback(() => {
     maskCacheRef.current.clear();
     setMaskImage(null);
+  }, []);
+
+  const clearBackendState = useCallback((frameIdx) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        action: 'clear_clicks',
+        frame_idx: frameIdx
+      }));
+    }
+  }, []);
+
+  const removeObject = useCallback((objId, frameIdx) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        action: 'remove_object',
+        obj_id: objId,
+        frame_idx: frameIdx
+      }));
+    }
   }, []);
 
   const resetExport = useCallback(() => {
@@ -286,6 +307,8 @@ export function useAIEngine() {
     startExport,
     resetExport,
     requestMask,
-    clearMaskCache
+    clearMaskCache,
+    clearBackendState,
+    removeObject
   };
 };

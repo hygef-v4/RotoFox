@@ -18,6 +18,9 @@ const VideoCanvas = ({
   isUploading = false,
   viewMode = 'overlay',  // overlay, isolated
   onRequestMask,         // called during playback to sync mask with frame
+  objects = [],          // Add objects prop
+  activeObjectId,        // Add activeObjectId prop
+  deleteObjectSignal,    // Signal to delete a specific object's points
 }) => {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
@@ -65,36 +68,27 @@ const VideoCanvas = ({
         ctx.globalCompositeOperation = 'source-over';
       }
     } else {
-      // Overlay mode - draw red tinted mask on top of video
+      // Overlay mode - draw mask on top of video
       if (maskImageObjRef.current) {
-        // Draw mask to a temp area, then tint it
-        ctx.globalCompositeOperation = 'source-over';
-        // Save the current canvas (video frame)
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = canvas.width;
-        tempCanvas.height = canvas.height;
-        const tempCtx = tempCanvas.getContext('2d');
-        tempCtx.drawImage(maskImageObjRef.current, 0, 0, canvas.width, canvas.height);
-        tempCtx.globalCompositeOperation = 'source-in';
-        tempCtx.fillStyle = 'rgba(255, 0, 0, 0.5)';
-        tempCtx.fillRect(0, 0, canvas.width, canvas.height);
-        // Composite the tinted mask onto main canvas
-        ctx.drawImage(tempCanvas, 0, 0);
+        ctx.drawImage(maskImageObjRef.current, 0, 0, canvas.width, canvas.height);
       }
     }
 
     // 2. Committed selection boxes
-    boxesRef.current.forEach(({ x1, y1, x2, y2 }) => {
+    boxesRef.current.forEach(({ x1, y1, x2, y2, objId }) => {
       const px1 = x1 * canvas.width;
       const py1 = y1 * canvas.height;
       const pw  = (x2 - x1) * canvas.width;
       const ph  = (y2 - y1) * canvas.height;
+      
+      ctx.globalAlpha = (objId === activeObjectId) ? 1.0 : 0.4;
       ctx.strokeStyle = '#f97316';
       ctx.lineWidth = 2;
       ctx.setLineDash([]);
       ctx.strokeRect(px1, py1, pw, ph);
       ctx.fillStyle = 'rgba(249,115,22,0.12)';
       ctx.fillRect(px1, py1, pw, ph);
+      ctx.globalAlpha = 1.0;
     });
 
     // 3. Live drag box (box mode only)
@@ -112,19 +106,29 @@ const VideoCanvas = ({
       ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
     }
 
-    // 4. Click point dots (Add = green, Remove = red)
-    clickPointsRef.current.forEach(({ x, y, mode }) => {
+    // 4. Click point dots (match object color, or red for remove)
+    clickPointsRef.current.forEach(({ x, y, mode, objId }) => {
       const px = x * canvas.width;
       const py = y * canvas.height;
 
       const isAdd = mode === 'add';
-      const fill   = isAdd ? '#22c55e' : '#ef4444';
-      const stroke = isAdd ? '#16a34a' : '#dc2626';
+      
+      // Find object color
+      const obj = objects.find(o => o.id === objId);
+      const baseColor = obj ? obj.color : '#22c55e'; // Fallback to green
+      
+      // If mode is 'remove', we can use red, or just the object's color but maybe smaller/different shape.
+      // But the SAM 2 UI usually just uses Red for negative points.
+      const fill   = isAdd ? baseColor : '#ef4444';
+      const stroke = isAdd ? baseColor : '#dc2626';
+
+      // Draw faint ring if not the active object
+      ctx.globalAlpha = (objId === activeObjectId) ? 1.0 : 0.4;
 
       // Outer glow
       ctx.beginPath();
       ctx.arc(px, py, DOT_RADIUS + 3, 0, Math.PI * 2);
-      ctx.fillStyle = isAdd ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)';
+      ctx.fillStyle = isAdd ? `${baseColor}40` : 'rgba(239,68,68,0.25)'; // 40 is hex for 25% opacity
       ctx.fill();
 
       // Solid dot
@@ -141,8 +145,10 @@ const VideoCanvas = ({
       ctx.arc(px, py, 2, 0, Math.PI * 2);
       ctx.fillStyle = '#ffffff';
       ctx.fill();
+      
+      ctx.globalAlpha = 1.0;
     });
-  }, [viewMode]); // Re-draw when view mode changes
+  }, [viewMode, activeObjectId, objects]); // Re-draw when view mode, active object, or objects array changes
 
   // ── Clear all points when clearSignal fires ────────────────────────────────
   useEffect(() => {
@@ -151,6 +157,15 @@ const VideoCanvas = ({
     drawCanvas();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clearSignal]);
+
+  // ── Remove points for a specific object when deleteObjectSignal fires ──────
+  useEffect(() => {
+    if (deleteObjectSignal && deleteObjectSignal.id !== undefined) {
+      clickPointsRef.current = clickPointsRef.current.filter(p => p.objId !== deleteObjectSignal.id);
+      boxesRef.current = boxesRef.current.filter(b => b.objId !== deleteObjectSignal.id);
+      drawCanvas();
+    }
+  }, [deleteObjectSignal, drawCanvas]);
 
   // ── Clear points when user navigates to a different frame ─────────────────
   useEffect(() => {
@@ -280,18 +295,20 @@ const VideoCanvas = ({
 
     if (mode === 'add' || mode === 'remove') {
       // Immediately place a visual dot
-      clickPointsRef.current = [...clickPointsRef.current, { x, y, mode }];
+      clickPointsRef.current = [...clickPointsRef.current, { x, y, mode, objId: activeObjectId }];
       drawCanvas();
       // Notify parent (sends to WebSocket)
-      onCanvasClickRef.current?.(clickPointsRef.current, boxesRef.current);
+      const filteredPoints = clickPointsRef.current.filter(p => p.objId === activeObjectId);
+      const filteredBoxes = boxesRef.current.filter(b => b.objId === activeObjectId);
+      onCanvasClickRef.current?.(filteredPoints, filteredBoxes);
     } else {
       // box mode: start drag
       isDraggingRef.current = true;
-      dragStartRef.current = { x, y };
+      dragStartRef.current = { x, y, objId: activeObjectId };
       dragEndRef.current = { x, y };
       drawCanvas();
     }
-  }, [drawCanvas]);
+  }, [drawCanvas, activeObjectId]);
 
   const handleMouseMove = useCallback((e) => {
     if (!isDraggingRef.current) return;
@@ -308,23 +325,26 @@ const VideoCanvas = ({
     const start = dragStartRef.current ?? { x, y };
     const dist = Math.hypot(x - start.x, y - start.y);
 
-    if (dist > 0.01) {
+      if (dist > 0.01) {
       const box = {
         x1: Math.min(start.x, x),
         y1: Math.min(start.y, y),
         x2: Math.max(start.x, x),
         y2: Math.max(start.y, y),
+        objId: activeObjectId
       };
       // Save box visually
       boxesRef.current = [...boxesRef.current, box];
       // Notify parent
-      onCanvasClickRef.current?.(clickPointsRef.current, boxesRef.current);
+      const filteredPoints = clickPointsRef.current.filter(p => p.objId === activeObjectId);
+      const filteredBoxes = boxesRef.current.filter(b => b.objId === activeObjectId);
+      onCanvasClickRef.current?.(filteredPoints, filteredBoxes);
     }
 
     dragStartRef.current = null;
     dragEndRef.current = null;
     drawCanvas();
-  }, [drawCanvas]);
+  }, [drawCanvas, activeObjectId]);
 
   const handleMouseLeave = useCallback(() => {
     if (isDraggingRef.current) {

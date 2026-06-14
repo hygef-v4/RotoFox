@@ -26,15 +26,16 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_json({"status": "video_loaded", "video_id": video_id})
 
             elif action == "track_forward":
-                video_id = data.get("video_id", ai_engine.video_id or "unknown")
+                video_id = data.get("video_id")
                 total_frames = data.get("total_frames", 50)
+                start_frame = data.get("start_frame", None)
                 
                 # Use ai_engine's own state so propagation sees is_tracking=True
                 ai_engine.state.start_tracking(video_id, total_frames)
                 
                 # Propagation is a long-running generator with awaits inside, so we don't run_in_threadpool it completely.
                 # However, it contains its own asyncio.sleep to yield control.
-                asyncio.create_task(ai_engine.run_propagation(websocket))
+                asyncio.create_task(ai_engine.run_propagation(websocket, start_frame))
                 
             elif action == "cancel_tracking":
                 ai_engine.state.request_cancel()
@@ -44,12 +45,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 labels = data.get("labels", [])
                 box = data.get("box", None)
                 frame_idx = data.get("frame_idx", 0)
+                obj_id = data.get("obj_id", 1)
                 
                 try:
                     # Run PyTorch operation in threadpool so it doesn't block websocket pings
                     mask_b64 = await run_in_threadpool(
                         ai_engine.add_point_or_box,
                         frame_idx=frame_idx, 
+                        obj_id=obj_id,
                         points=points,
                         labels=labels,
                         box=box, 
@@ -87,6 +90,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 except Exception as e:
                     print(f"Error clearing clicks: {e}")
                 
+            elif action == "remove_object":
+                obj_id = data.get("obj_id", 1)
+                frame_idx = data.get("frame_idx", 0)
+                try:
+                    b64_mask = await run_in_threadpool(ai_engine.remove_object, obj_id, frame_idx)
+                    if b64_mask is not None:
+                        await websocket.send_json({
+                            "status": "mask_update",
+                            "frame": frame_idx,
+                            "mask_base64": b64_mask
+                        })
+                except Exception as e:
+                    print(f"Error removing object: {e}")
+
             elif action == "export":
                 # Data is now sent flat from frontend
                 asyncio.create_task(ai_engine.run_export(websocket, data))

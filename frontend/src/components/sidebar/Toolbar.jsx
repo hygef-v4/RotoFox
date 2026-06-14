@@ -1,7 +1,7 @@
 import React, { useRef } from 'react';
-import { Upload, Download, MousePointer2, Plus, Minus, Settings, Play, Square } from 'lucide-react';
+import { Upload, Download, MousePointer2, Plus, Minus, Settings, Play, Square, Trash2 } from 'lucide-react';
 import logo from '../../assets/rotofox_logo.png';
-const Toolbar = ({ clickMode, setClickMode, onVideoImport, onExportClick, onClearClicks, viewMode, setViewMode }) => {
+const Toolbar = ({ clickMode, setClickMode, onVideoImport, onExportClick, onClearClicks, viewMode, setViewMode, objects, activeObjectId, setActiveObjectId, handleAddObject, handleDeleteObject }) => {
   const fileInputRef = useRef(null);
 
   const handleImportClick = () => {
@@ -37,6 +37,48 @@ const Toolbar = ({ clickMode, setClickMode, onVideoImport, onExportClick, onClea
           >
             <Upload size={16} />
             Import Video
+          </button>
+        </div>
+      </div>
+
+      {/* OBJECT MANAGEMENT */}
+      <div className="mb-6">
+        <h3 className="text-sm font-semibold text-textSecondary uppercase tracking-wider mb-3">Objects</h3>
+        <div className="space-y-2">
+          {objects && objects.map(obj => (
+            <div 
+              key={obj.id}
+              onClick={() => setActiveObjectId(obj.id)}
+              className={`flex items-center justify-between p-2 rounded cursor-pointer transition-colors border ${
+                activeObjectId === obj.id 
+                  ? 'bg-surfaceHover border-primary' 
+                  : 'bg-transparent border-transparent hover:bg-surfaceHover hover:border-border'
+              }`}
+            >
+              <div className="flex items-center gap-3">
+                <div 
+                  className="w-4 h-4 rounded-sm" 
+                  style={{ backgroundColor: obj.color }}
+                ></div>
+                <span className="text-sm font-medium text-textPrimary">{obj.name}</span>
+              </div>
+              {objects.length > 1 && (
+                <button 
+                  onClick={(e) => handleDeleteObject(e, obj.id)}
+                  className="text-textSecondary hover:text-red-400 p-1 rounded-md hover:bg-surface transition-colors"
+                  title="Remove object"
+                >
+                  <Trash2 size={14} />
+                </button>
+              )}
+            </div>
+          ))}
+          <button 
+            onClick={handleAddObject}
+            className="w-full flex items-center justify-center gap-2 p-2 mt-2 border border-dashed border-border rounded text-textSecondary hover:text-textPrimary hover:border-textSecondary hover:bg-surfaceHover transition-colors"
+          >
+            <Plus size={16} />
+            <span className="text-sm font-medium">Add another object</span>
           </button>
         </div>
       </div>

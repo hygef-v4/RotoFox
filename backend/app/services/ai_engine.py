@@ -18,13 +18,22 @@ try:
 except ImportError:
     SAM2_AVAILABLE = False
 
+PALETTE = {
+    1: [255, 59, 48, 150],   # Red
+    2: [0, 122, 255, 150],   # Blue
+    3: [52, 199, 89, 150],   # Green
+    4: [255, 149, 0, 150],   # Orange
+    5: [175, 82, 222, 150],  # Purple
+    6: [90, 200, 250, 150],  # Cyan
+    7: [255, 204, 0, 150],   # Yellow
+}
+
 class AIEngine:
     def __init__(self):
         self.state = EngineState()
         self.predictor = None
         self.inference_state = None
         self.video_id = None
-        self.obj_id = 1
         self.video_width = 1280
         self.video_height = 720
         
@@ -92,8 +101,8 @@ class AIEngine:
             self.predictor.reset_state(self.inference_state)
         self.video_id = video_id
 
-    def add_point_or_box(self, frame_idx: int, points: list, labels: list, box: list, width: int, height: int):
-        print(f"AIEngine: add_point_or_box. Frame: {frame_idx}, Points: {len(points) if points else 0}, Box: {'Yes' if box else 'No'}, Scale: {width}x{height}")
+    def add_point_or_box(self, frame_idx: int, obj_id: int, points: list, labels: list, box: list, width: int, height: int):
+        print(f"AIEngine: add_point_or_box. Frame: {frame_idx}, Obj: {obj_id}, Points: {len(points) if points else 0}, Box: {'Yes' if box else 'No'}, Scale: {width}x{height}")
         if not self.inference_state:
             raise RuntimeError("No video loaded into AI engine.")
 
@@ -114,7 +123,7 @@ class AIEngine:
                 _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
                     inference_state=self.inference_state,
                     frame_idx=frame_idx,
-                    obj_id=self.obj_id,
+                    obj_id=obj_id,
                     points=abs_points,
                     labels=abs_labels,
                     box=abs_box,
@@ -124,30 +133,38 @@ class AIEngine:
             _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
                 inference_state=self.inference_state,
                 frame_idx=frame_idx,
-                obj_id=self.obj_id,
+                obj_id=obj_id,
                 points=abs_points,
                 labels=abs_labels,
                 box=abs_box,
                 clear_old_points=True
             )
         
-        # Convert mask to base64
-        mask = (out_mask_logits[0] > 0.0).cpu().numpy().squeeze()
-        print(f"AIEngine: Mask generated. Shape: {mask.shape}, Active pixels: {np.sum(mask)}")
-        return self._mask_to_base64(mask)
+        return self._masks_to_base64(out_obj_ids, out_mask_logits, self.video_width, self.video_height)
 
-    def _mask_to_base64(self, mask_np):
+    def _masks_to_base64(self, out_obj_ids, out_mask_logits, width, height):
+        # Create an empty RGBA image
+        if len(out_obj_ids) == 0:
+            return None
+            
+        # Get shape from the first mask
+        mask_np = (out_mask_logits[0] > 0.0).cpu().numpy().squeeze()
         h, w = mask_np.shape
         rgba = np.zeros((h, w, 4), dtype=np.uint8)
-        # White color, fully opaque where mask is True, transparent where False
-        rgba[mask_np, :] = [255, 255, 255, 255]
         
+        for idx, obj_id in enumerate(out_obj_ids):
+            mask = (out_mask_logits[idx] > 0.0).cpu().numpy().squeeze()
+            # Get color based on obj_id, wrap around if > 7
+            color_key = ((obj_id - 1) % 7) + 1
+            color = PALETTE.get(color_key, [255, 255, 255, 150])
+            rgba[mask] = color
+            
         img = Image.fromarray(rgba, 'RGBA')
         buf = io.BytesIO()
         img.save(buf, format='PNG')
         return base64.b64encode(buf.getvalue()).decode('utf-8')
 
-    async def run_propagation(self, websocket):
+    async def run_propagation(self, websocket, start_frame=None):
         if not self.state.is_tracking or not self.inference_state:
             print("AI Engine: Cannot start propagation - not tracking or no inference state")
             return
@@ -161,7 +178,7 @@ class AIEngine:
             # We iterate the generator directly to support real-time streaming of masks and progress
             if hasattr(self, 'device') and self.device.type == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
                 with torch.autocast("cuda", dtype=torch.bfloat16):
-                    generator = self.predictor.propagate_in_video(self.inference_state)
+                    generator = self.predictor.propagate_in_video(self.inference_state, start_frame_idx=start_frame)
                     
                     for out_frame_idx, out_obj_ids, out_mask_logits in generator:
                         if self.state.cancel_requested:
@@ -169,14 +186,15 @@ class AIEngine:
                             await websocket.send_json({"status": "cancelled", "frame": out_frame_idx})
                             break
                         
-                        # Convert the mask to base64
-                        mask = (out_mask_logits[0] > 0.0).cpu().numpy().squeeze()
+                        b64_mask = self._masks_to_base64(out_obj_ids, out_mask_logits, self.video_width, self.video_height)
                         
-                        # Save mask to disk for export
-                        mask_filename = f"{out_frame_idx:05d}.png"
-                        cv2.imwrite(str(mask_dir / mask_filename), (mask.astype(np.uint8) * 255))
-                        
-                        b64_mask = self._mask_to_base64(mask)
+                        # Save mask to disk for export (optional, but keep for now if single object export is needed, though export logic might need updating later)
+                        # We just save the combined mask for visual caching
+                        if b64_mask:
+                            mask_filename = f"{out_frame_idx:05d}.png"
+                            img_bytes = base64.b64decode(b64_mask)
+                            with open(mask_dir / mask_filename, "wb") as f:
+                                f.write(img_bytes)
                         
                         self.state.current_frame = out_frame_idx
                         progress = int((out_frame_idx / max(self.state.total_frames, 1)) * 100)
@@ -194,7 +212,7 @@ class AIEngine:
                         print("AI Engine: Propagation completed successfully.")
                         await websocket.send_json({"status": "completed"})
             else:
-                generator = self.predictor.propagate_in_video(self.inference_state)
+                generator = self.predictor.propagate_in_video(self.inference_state, start_frame_idx=start_frame)
                 
                 for out_frame_idx, out_obj_ids, out_mask_logits in generator:
                     if self.state.cancel_requested:
@@ -202,14 +220,13 @@ class AIEngine:
                         await websocket.send_json({"status": "cancelled", "frame": out_frame_idx})
                         break
                     
-                    # Convert the mask to base64
-                    mask = (out_mask_logits[0] > 0.0).cpu().numpy().squeeze()
+                    b64_mask = self._masks_to_base64(out_obj_ids, out_mask_logits, self.video_width, self.video_height)
                     
-                    # Save mask to disk for export
-                    mask_filename = f"{out_frame_idx:05d}.png"
-                    cv2.imwrite(str(mask_dir / mask_filename), (mask.astype(np.uint8) * 255))
-                        
-                    b64_mask = self._mask_to_base64(mask)
+                    if b64_mask:
+                        mask_filename = f"{out_frame_idx:05d}.png"
+                        img_bytes = base64.b64decode(b64_mask)
+                        with open(mask_dir / mask_filename, "wb") as f:
+                            f.write(img_bytes)
                     
                     self.state.current_frame = out_frame_idx
                     progress = int((out_frame_idx / max(self.state.total_frames, 1)) * 100)
@@ -237,6 +254,25 @@ class AIEngine:
             # Dọn dẹp bộ nhớ sau khi tracking xong (kể cả lỗi hay thành công)
             from fastapi.concurrency import run_in_threadpool
             await run_in_threadpool(MemoryManager.cleanup)
+
+    def remove_object(self, obj_id: int, frame_idx: int = None):
+        if not self.inference_state:
+            return None
+        try:
+            _, updated_frames = self.predictor.remove_object(self.inference_state, obj_id)
+            print(f"AIEngine: Object {obj_id} removed.")
+            
+            # Find if there is an updated mask for the current frame
+            if frame_idx is not None:
+                for f_idx, out_mask_logits in updated_frames:
+                    if f_idx == frame_idx:
+                        # Get remaining obj_ids
+                        out_obj_ids = self.inference_state.get("obj_ids", [])
+                        return self._masks_to_base64(out_obj_ids, out_mask_logits, self.video_width, self.video_height)
+            return None
+        except Exception as e:
+            print(f"AIEngine: Error removing object {obj_id}: {e}")
+            return None
 
     async def run_export(self, websocket, settings: dict):
         export_format = settings.get("format", "mp4")
