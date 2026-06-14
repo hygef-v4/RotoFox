@@ -34,6 +34,7 @@ function App() {
     sendClick,
     startTracking,
     cancelTracking,
+    uploadVideo,
     
     // Export values
     exportProgress,
@@ -43,6 +44,8 @@ function App() {
     startExport,
     resetExport
   } = useAIEngine();
+
+  const [backendFramesCount, setBackendFramesCount] = useState(null);
 
   // Sync current frame from AI tracking progress updates
   useEffect(() => {
@@ -56,44 +59,30 @@ function App() {
     setIsPlaying(false);
     setCurrentFrame(0);
     setVideoOffsetFrame(0);
+    setBackendFramesCount(null); // Reset for new video
     console.log("Importing video locally:", file.name);
 
-    // Upload to backend for SAM 2 processing
-    const formData = new FormData();
-    formData.append('file', file);
-    
-    try {
-      // Assuming backend is at 127.0.0.1:8000
-      const response = await fetch('http://127.0.0.1:8000/upload', {
-        method: 'POST',
-        body: formData,
-      });
-      const data = await response.json();
-      if (data.status === 'success') {
-        console.log(`Backend ready: ${data.frames_count} frames extracted. Video ID: ${data.video_id}`);
-        // Notify the websocket engine to use this video_id for tracking
-        wsRef.current?.send(JSON.stringify({
-          action: 'set_video_id',
-          video_id: data.video_id
-        }));
-      } else {
-        console.error("Backend upload failed:", data.message);
-      }
-    } catch (err) {
-      console.error("Failed to reach backend for upload:", err);
+    // Upload to backend for SAM 2 frame extraction + model loading
+    const result = await uploadVideo(file);
+    if (result) {
+      console.log(`Video successfully loaded into SAM 2 engine. Extracted ${result.frames_count} frames.`);
+      setBackendFramesCount(result.frames_count);
+      setTotalFrames(result.frames_count);
+      setTrimEnd(result.frames_count);
     }
   };
 
   // Sample video logic removed for production ready state
 
   const handleVideoMetadataLoaded = (metadata) => {
-    const total = metadata.totalFrames;
-    setTotalFrames(total);
+    // If backend already returned true frame count, use it. Else estimate 30fps.
+    const actualFrames = backendFramesCount || metadata.totalFrames;
+    setTotalFrames(actualFrames);
     setTrimStart(0);
-    setTrimEnd(total);
+    setTrimEnd(actualFrames);
     setCurrentFrame(0);
     setVideoOffsetFrame(0);
-    console.log(`Video loaded: ${total} frames, duration ${metadata.duration.toFixed(2)}s`);
+    console.log(`Video loaded: ${actualFrames} frames, duration ${metadata.duration.toFixed(2)}s`);
   };
 
   const handleCanvasClick = (coords, mode) => {

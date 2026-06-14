@@ -24,6 +24,8 @@ class AIEngine:
         self.inference_state = None
         self.video_id = None
         self.obj_id = 1
+        self.video_width = 1280
+        self.video_height = 720
         
         if SAM2_AVAILABLE:
             self._init_model()
@@ -56,15 +58,32 @@ class AIEngine:
             raise RuntimeError("SAM 2 is not installed or weights are missing. Please run setup_sam2.py")
         
         video_dir = CacheManager.get_video_dir(video_id)
-        if not video_dir.exists() or len(list(video_dir.glob("*.jpg"))) == 0:
+        frames = list(video_dir.glob("*.jpg"))
+        if not video_dir.exists() or len(frames) == 0:
             raise RuntimeError("Video frames not extracted.")
             
+        # Read the dimensions of the first frame to scale coordinates
+        first_frame = sorted(frames)[0]
+        try:
+            with Image.open(first_frame) as img:
+                self.video_width, self.video_height = img.size
+            print(f"AIEngine: Loaded video dimensions: {self.video_width}x{self.video_height}")
+        except Exception as e:
+            print(f"Warning: Could not read video dimensions from first frame: {e}. Defaulting to 1280x720")
+            self.video_width, self.video_height = 1280, 720
+
         print(f"AIEngine: Initializing state for video {video_id}")
-        self.inference_state = self.predictor.init_state(video_path=str(video_dir))
+        if hasattr(self, 'device') and self.device.type == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                self.inference_state = self.predictor.init_state(video_path=str(video_dir))
+                self.predictor.reset_state(self.inference_state)
+        else:
+            self.inference_state = self.predictor.init_state(video_path=str(video_dir))
+            self.predictor.reset_state(self.inference_state)
         self.video_id = video_id
-        self.predictor.reset_state(self.inference_state)
 
     def add_point_or_box(self, frame_idx: int, coords: list, mode: str, width: int, height: int):
+        print(f"AIEngine: add_point_or_box. Frame: {frame_idx}, Coords: {coords}, Mode: {mode}, Scale: {width}x{height}")
         if not self.inference_state:
             raise RuntimeError("No video loaded into AI engine.")
 
@@ -74,27 +93,49 @@ class AIEngine:
             x, y = coords[0] * width, coords[1] * height
             points = np.array([[x, y]], dtype=np.float32)
             labels = np.array([1 if mode == 'add' else 0], np.int32)
-            _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
-                inference_state=self.inference_state,
-                frame_idx=frame_idx,
-                obj_id=self.obj_id,
-                points=points,
-                labels=labels,
-            )
+            
+            if hasattr(self, 'device') and self.device.type == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
+                        inference_state=self.inference_state,
+                        frame_idx=frame_idx,
+                        obj_id=self.obj_id,
+                        points=points,
+                        labels=labels,
+                    )
+            else:
+                _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
+                    inference_state=self.inference_state,
+                    frame_idx=frame_idx,
+                    obj_id=self.obj_id,
+                    points=points,
+                    labels=labels,
+                )
         elif mode == 'box':
             x1, y1, x2, y2 = coords[0] * width, coords[1] * height, coords[2] * width, coords[3] * height
             box = np.array([x1, y1, x2, y2], dtype=np.float32)
-            _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
-                inference_state=self.inference_state,
-                frame_idx=frame_idx,
-                obj_id=self.obj_id,
-                box=box,
-            )
+            print(f"AIEngine: Prompt box scaled coordinates: [{x1}, {y1}, {x2}, {y2}]")
+            if hasattr(self, 'device') and self.device.type == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
+                        inference_state=self.inference_state,
+                        frame_idx=frame_idx,
+                        obj_id=self.obj_id,
+                        box=box,
+                    )
+            else:
+                _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
+                    inference_state=self.inference_state,
+                    frame_idx=frame_idx,
+                    obj_id=self.obj_id,
+                    box=box,
+                )
         else:
             raise ValueError("Invalid click mode")
         
         # Convert mask to base64
         mask = (out_mask_logits[0] > 0.0).cpu().numpy().squeeze()
+        print(f"AIEngine: Mask generated. Shape: {mask.shape}, Active pixels: {np.sum(mask)}")
         return self._mask_to_base64(mask)
 
     def _mask_to_base64(self, mask_np):
@@ -109,40 +150,80 @@ class AIEngine:
 
     async def run_propagation(self, websocket):
         if not self.state.is_tracking or not self.inference_state:
+            print("AI Engine: Cannot start propagation - not tracking or no inference state")
             return
 
-        print("AI Engine: Starting propagation...")
+        print(f"AI Engine: Starting propagation for {self.state.total_frames} frames...")
         try:
-            for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor.propagate_in_video(self.inference_state):
-                if self.state.cancel_requested:
-                    print(f"AI Engine: Propagation cancelled at frame {out_frame_idx}")
-                    await websocket.send_json({"status": "cancelled", "frame": out_frame_idx})
-                    break
+            # We iterate the generator directly to support real-time streaming of masks and progress
+            if hasattr(self, 'device') and self.device.type == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    generator = self.predictor.propagate_in_video(self.inference_state)
+                    
+                    for out_frame_idx, out_obj_ids, out_mask_logits in generator:
+                        if self.state.cancel_requested:
+                            print(f"AI Engine: Propagation cancelled at frame {out_frame_idx}")
+                            await websocket.send_json({"status": "cancelled", "frame": out_frame_idx})
+                            break
+                        
+                        # Convert the mask to base64
+                        mask = (out_mask_logits[0] > 0.0).cpu().numpy().squeeze()
+                        b64_mask = self._mask_to_base64(mask)
+                        
+                        self.state.current_frame = out_frame_idx
+                        progress = int((out_frame_idx / max(self.state.total_frames, 1)) * 100)
+                        
+                        await websocket.send_json({
+                            "status": "tracking",
+                            "frame": out_frame_idx,
+                            "progress": progress,
+                            "mask_base64": b64_mask
+                        })
+                        
+                        # Yield control to the event loop so that other events (like cancel_tracking) can be processed
+                        await asyncio.sleep(0.001)
+                    else:
+                        print("AI Engine: Propagation completed successfully.")
+                        await websocket.send_json({"status": "completed"})
+            else:
+                generator = self.predictor.propagate_in_video(self.inference_state)
                 
-                self.state.current_frame = out_frame_idx
-                
-                mask = (out_mask_logits[0] > 0.0).cpu().numpy().squeeze()
-                b64_mask = self._mask_to_base64(mask)
-                
-                progress = int((out_frame_idx / self.state.total_frames) * 100)
-                await websocket.send_json({
-                    "status": "tracking",
-                    "frame": out_frame_idx,
-                    "progress": progress,
-                    "mask_base64": b64_mask
-                })
-                await asyncio.sleep(0.01)
-
-            if not self.state.cancel_requested:
-                print("AI Engine: Propagation completed successfully.")
-                await websocket.send_json({"status": "completed"})
+                for out_frame_idx, out_obj_ids, out_mask_logits in generator:
+                    if self.state.cancel_requested:
+                        print(f"AI Engine: Propagation cancelled at frame {out_frame_idx}")
+                        await websocket.send_json({"status": "cancelled", "frame": out_frame_idx})
+                        break
+                    
+                    # Convert the mask to base64
+                    mask = (out_mask_logits[0] > 0.0).cpu().numpy().squeeze()
+                    b64_mask = self._mask_to_base64(mask)
+                    
+                    self.state.current_frame = out_frame_idx
+                    progress = int((out_frame_idx / max(self.state.total_frames, 1)) * 100)
+                    
+                    await websocket.send_json({
+                        "status": "tracking",
+                        "frame": out_frame_idx,
+                        "progress": progress,
+                        "mask_base64": b64_mask
+                    })
+                    
+                    # Yield control to the event loop so that other events (like cancel_tracking) can be processed
+                    await asyncio.sleep(0.001)
+                else:
+                    print("AI Engine: Propagation completed successfully.")
+                    await websocket.send_json({"status": "completed"})
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             print(f"AI Engine Error: {e}")
             await websocket.send_json({"status": "error", "message": str(e)})
         finally:
-            self.state.reset()
-            MemoryManager.cleanup()
+            self.state.is_tracking = False
+            # Dọn dẹp bộ nhớ sau khi tracking xong (kể cả lỗi hay thành công)
+            from fastapi.concurrency import run_in_threadpool
+            await run_in_threadpool(MemoryManager.cleanup)
 
     async def run_export(self, websocket, settings: dict):
         format = settings.get("format", "mp4")

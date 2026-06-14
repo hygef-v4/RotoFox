@@ -18,3 +18,5 @@ class MemoryManager:
             # (Tùy chọn) Có thể log thông tin bộ nhớ đã giải phóng
             # allocated = torch.cuda.memory_allocated()
             # print(f"CUDA Memory Allocated: {allocated / (1024**2):.2f} MB")
+            
+        print("MemoryManager: Cleanup finished. AI Engine is idle and ready.")

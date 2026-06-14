@@ -6,6 +6,12 @@ export function useAIEngine() {
   const [isConnected, setIsConnected] = useState(false);
   const [isTracking, setIsTracking] = useState(false);
   const [maskImage, setMaskImage] = useState(null);
+  const [videoId, setVideoId] = useState(null);
+  
+  const videoIdRef = useRef(null);
+  useEffect(() => {
+    videoIdRef.current = videoId;
+  }, [videoId]);
   
   const [progressData, setProgressData] = useState({
     currentFrame: 0,
@@ -22,53 +28,90 @@ export function useAIEngine() {
   const wsRef = useRef(null);
 
   useEffect(() => {
-    // Khởi tạo kết nối WebSockets
-    const ws = new WebSocket(WS_URL);
-    
-    ws.onopen = () => {
-      console.log('Connected to AI Engine Backend');
-      setIsConnected(true);
-    };
+    let ws = null;
+    let reconnectTimer = null;
+    let reconnectDelay = 1000; // Start at 1s, double on each failure
+    let isMounted = true;
 
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      console.log("WS Received:", data);
+    function connect() {
+      if (!isMounted) return;
       
-      if (data.status === "tracking") {
-        setProgressData(prev => ({
-          ...prev,
-          currentFrame: data.frame,
-          progress: data.progress
-        }));
-      } else if (data.status === "completed" || data.status === "cancelled") {
+      ws = new WebSocket(WS_URL);
+      
+      ws.onopen = () => {
+        console.log('Connected to AI Engine Backend');
+        setIsConnected(true);
+        reconnectDelay = 1000; // reset on success
+        if (videoIdRef.current) {
+          console.log('Restoring video session on reconnect:', videoIdRef.current);
+          ws.send(JSON.stringify({
+            action: 'set_video_id',
+            video_id: videoIdRef.current
+          }));
+        }
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        console.log("WS Received:", data);
+        
+        if (data.status === "tracking") {
+          setProgressData(prev => ({
+            ...prev,
+            currentFrame: data.frame,
+            progress: data.progress
+          }));
+          if (data.mask_base64) {
+            setMaskImage(data.mask_base64);
+          }
+        } else if (data.status === "completed" || data.status === "cancelled") {
+          setIsTracking(false);
+        } else if (data.status === "export_progress") {
+          setExportStatus("rendering");
+          setExportProgress(data.progress);
+          setExportMessage(data.message || "");
+        } else if (data.status === "export_completed") {
+          setExportStatus("completed");
+          setExportProgress(100);
+          setExportFilePath(data.file_path);
+          setExportMessage("Project exported successfully!");
+        } else if (data.status === "export_error") {
+          setExportStatus("error");
+          setExportMessage(data.message || "Failed to export");
+        } else if (data.mask_base64) {
+          setMaskImage(data.mask_base64);
+        }
+      };
+
+      ws.onclose = () => {
+        console.log('Disconnected from AI Engine');
+        setIsConnected(false);
         setIsTracking(false);
-      } else if (data.status === "export_progress") {
-        setExportStatus("rendering");
-        setExportProgress(data.progress);
-        setExportMessage(data.message || "");
-      } else if (data.status === "export_completed") {
-        setExportStatus("completed");
-        setExportProgress(100);
-        setExportFilePath(data.file_path);
-        setExportMessage("Project exported successfully!");
-      } else if (data.status === "export_error") {
-        setExportStatus("error");
-        setExportMessage(data.message || "Failed to export");
-      } else if (data.mask_base64) {
-        setMaskImage(data.mask_base64);
-      }
-    };
+        wsRef.current = null;
 
-    ws.onclose = () => {
-      console.log('Disconnected from AI Engine');
-      setIsConnected(false);
-      setIsTracking(false);
-    };
+        // Auto-reconnect
+        if (isMounted) {
+          console.log(`Reconnecting in ${reconnectDelay / 1000}s...`);
+          reconnectTimer = setTimeout(() => {
+            reconnectDelay = Math.min(reconnectDelay * 2, 10000);
+            connect();
+          }, reconnectDelay);
+        }
+      };
 
-    wsRef.current = ws;
+      ws.onerror = () => {
+        // onclose will fire after this, which handles reconnect
+      };
+
+      wsRef.current = ws;
+    }
+
+    connect();
 
     return () => {
-      ws.close();
+      isMounted = false;
+      clearTimeout(reconnectTimer);
+      ws?.close();
     };
   }, []);
 
@@ -88,11 +131,11 @@ export function useAIEngine() {
       setIsTracking(true);
       wsRef.current.send(JSON.stringify({
         action: 'track_forward',
-        video_id: 'test_video',
+        video_id: videoId || 'unknown',
         total_frames: customFrames || progressData.totalFrames
       }));
     }
-  }, [progressData.totalFrames]);
+  }, [videoId, progressData.totalFrames]);
 
   const cancelTracking = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -123,6 +166,38 @@ export function useAIEngine() {
     setExportFilePath("");
   }, []);
 
+  // Upload video file to backend, extract frames, and load into SAM 2
+  const uploadVideo = useCallback(async (file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const response = await fetch('http://127.0.0.1:8000/upload', {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await response.json();
+      if (data.status === 'success') {
+        console.log(`Backend ready: ${data.frames_count} frames extracted. Video ID: ${data.video_id}`);
+        setVideoId(data.video_id);
+        // Tell backend WebSocket handler which video this session is for
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({
+            action: 'set_video_id',
+            video_id: data.video_id
+          }));
+        }
+        return data;
+      } else {
+        console.error("Backend upload failed:", data.message);
+        return null;
+      }
+    } catch (err) {
+      console.error("Failed to reach backend for upload:", err);
+      return null;
+    }
+  }, []);
+
   return {
     isConnected,
     isTracking,
@@ -131,6 +206,7 @@ export function useAIEngine() {
     sendClick,
     startTracking,
     cancelTracking,
+    uploadVideo,
     
     // Export values
     exportProgress,

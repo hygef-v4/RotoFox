@@ -1,52 +1,58 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import asyncio
-from app.core.engine_state import EngineState
+from fastapi.concurrency import run_in_threadpool
 from app.services.ai_engine import AIEngine
 
 router = APIRouter()
 ai_engine = AIEngine()
-state = EngineState()
 
 @router.websocket("/ws/editor")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    print("WebSocket connection established with client")
     try:
         while True:
             data = await websocket.receive_json()
             action = data.get("action")
+            print(f"WebSocket action received: {action}")
             
             if action == "set_video_id":
-                ai_engine.video_id = data.get("video_id")
-                print(f"WebSocket session linked to video_id: {ai_engine.video_id}")
+                video_id = data.get("video_id")
+                # Removed redundant load_video call because it's already done in the POST endpoint
+                # and calling it here blocks the websocket/event loop again causing infinite reconnect loops.
+                if video_id:
+                    ai_engine.video_id = video_id
+                    print(f"WebSocket session linked to video_id: {video_id}")
+                    await websocket.send_json({"status": "video_loaded", "video_id": video_id})
 
             elif action == "track_forward":
-                # Giả lập tham số
-                video_id = data.get("video_id", "test_video")
+                video_id = data.get("video_id", ai_engine.video_id or "unknown")
                 total_frames = data.get("total_frames", 50)
                 
-                # Bắt đầu tracking
-                state.start_tracking(video_id, total_frames)
+                # Use ai_engine's own state so propagation sees is_tracking=True
+                ai_engine.state.start_tracking(video_id, total_frames)
                 
-                # Chạy propagation như một task chạy ngầm
+                # Propagation is a long-running generator with awaits inside, so we don't run_in_threadpool it completely.
+                # However, it contains its own asyncio.sleep to yield control.
                 asyncio.create_task(ai_engine.run_propagation(websocket))
                 
             elif action == "cancel_tracking":
-                state.request_cancel()
+                ai_engine.state.request_cancel()
                 
             elif action == "click":
                 coords = data.get("coords")
                 mode = data.get("type", "add")
                 frame_idx = data.get("frame_idx", 0)
                 
-                # Assume standard 1280x720 internal representation, or pass from frontend.
-                # Currently frontend sends normalized [0..1] coords, we will use 1280x720.
                 try:
-                    mask_b64 = ai_engine.add_point_or_box(
+                    # Run PyTorch operation in threadpool so it doesn't block websocket pings
+                    mask_b64 = await run_in_threadpool(
+                        ai_engine.add_point_or_box,
                         frame_idx=frame_idx, 
                         coords=coords, 
                         mode=mode, 
-                        width=1280, 
-                        height=720
+                        width=ai_engine.video_width, 
+                        height=ai_engine.video_height
                     )
                     await websocket.send_json({
                         "status": "received", 
@@ -63,4 +69,5 @@ async def websocket_endpoint(websocket: WebSocket):
                 
     except WebSocketDisconnect:
         print("Client disconnected from Editor UI")
-        state.request_cancel()
+        ai_engine.state.request_cancel()
+

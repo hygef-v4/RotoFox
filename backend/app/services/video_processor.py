@@ -1,5 +1,5 @@
 import os
-import subprocess
+import cv2
 from pathlib import Path
 from app.services.cache_manager import CacheManager
 
@@ -7,34 +7,44 @@ class VideoProcessor:
     @staticmethod
     def extract_frames(video_path: str, video_id: str, fps_limit: int = None) -> int:
         """
-        Trích xuất các frame từ video và lưu vào SSD cache sử dụng FFmpeg.
-        Trả về số lượng frame đã được trích xuất.
+        Extract frames from a video and save to the SSD cache directory using OpenCV.
+        Returns the number of frames extracted.
         """
         video_dir = CacheManager.get_video_dir(video_id)
         
-        # FFmpeg command để lấy frame (giữ chất lượng tốt nhất)
-        # Sử dụng output pattern frame_%05d.jpg
-        output_pattern = str(video_dir / "frame_%05d.jpg")
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Failed to open video: {video_path}")
         
-        command = [
-            "ffmpeg",
-            "-y",                   # Overwrite output files without asking
-            "-i", video_path,       # Input file
-            "-qscale:v", "2",       # High quality JPEG
-        ]
+        source_fps = cap.get(cv2.CAP_PROP_FPS)
+        total_source_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
+        # Calculate frame skip interval if fps_limit is set
+        frame_interval = 1
+        if fps_limit and source_fps > fps_limit:
+            frame_interval = int(round(source_fps / fps_limit))
+        
+        print(f"VideoProcessor: Extracting frames from {video_path}")
+        print(f"  Source FPS: {source_fps}, Total source frames: {total_source_frames}")
         if fps_limit:
-            command.extend(["-vf", f"fps={fps_limit}"])
-            
-        command.append(output_pattern)
+            print(f"  FPS limit: {fps_limit}, Frame interval: {frame_interval}")
         
-        print(f"Running FFmpeg to extract frames: {' '.join(command)}")
-        try:
-            subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        except subprocess.CalledProcessError as e:
-            print(f"FFmpeg extraction failed: {e.stderr.decode('utf-8')}")
-            raise RuntimeError("Failed to extract frames using FFmpeg.")
-
-        # Đếm số lượng frame đã tạo
-        frames = list(video_dir.glob("frame_*.jpg"))
-        return len(frames)
+        frame_count = 0
+        source_frame_idx = 0
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            if source_frame_idx % frame_interval == 0:
+                frame_filename = f"{frame_count:05d}.jpg"
+                frame_path = str(video_dir / frame_filename)
+                cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                frame_count += 1
+            
+            source_frame_idx += 1
+        
+        cap.release()
+        print(f"VideoProcessor: Extracted {frame_count} frames to {video_dir}")
+        return frame_count

@@ -135,11 +135,15 @@ const VideoCanvas = ({
   useEffect(() => {
     const video = videoRef.current;
     if (!video || isPlaying) return;
-    const targetTime = (currentFrame + videoOffsetFrame) / 30;
+    
+    // Calculate effective FPS based on true totalFrames vs video duration
+    const effectiveFps = (totalFrames && video.duration) ? (totalFrames / video.duration) : 30;
+    
+    const targetTime = (currentFrame + videoOffsetFrame) / effectiveFps;
     if (Math.abs(video.currentTime - targetTime) > 0.05) {
       video.currentTime = targetTime;
     }
-  }, [currentFrame, videoOffsetFrame, isPlaying]);
+  }, [currentFrame, videoOffsetFrame, isPlaying, totalFrames]);
 
   // ── rAF loop while playing ────────────────────────────────────────────────
   useEffect(() => {
@@ -148,7 +152,10 @@ const VideoCanvas = ({
     const loop = () => {
       const video = videoRef.current;
       if (!video) return;
-      const frame = Math.floor(video.currentTime * 30) - videoOffsetFrame;
+      
+      const effectiveFps = (totalFrames && video.duration) ? (totalFrames / video.duration) : 30;
+      const frame = Math.floor(video.currentTime * effectiveFps) - videoOffsetFrame;
+      
       if (frame >= totalFrames) {
         onPlayToggle(false);
         onFrameChange(0);

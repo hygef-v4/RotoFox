@@ -17,8 +17,8 @@ class CacheManager:
     def store_frame(video_id: str, frame_idx: int, frame_data: bytes) -> str:
         """Lưu một frame ảnh (nhị phân) vào ổ SSD."""
         video_dir = CacheManager.get_video_dir(video_id)
-        # Định dạng tên file: frame_00001.jpg
-        frame_filename = f"frame_{frame_idx:05d}.jpg"
+        # Định dạng tên file: 00001.jpg
+        frame_filename = f"{frame_idx:05d}.jpg"
         frame_path = video_dir / frame_filename
         
         with open(frame_path, "wb") as f:
@@ -30,7 +30,7 @@ class CacheManager:
     def get_frame_path(video_id: str, frame_idx: int) -> str:
         """Lấy đường dẫn tĩnh của một frame đã lưu."""
         video_dir = CACHE_BASE_DIR / video_id
-        frame_filename = f"frame_{frame_idx:05d}.jpg"
+        frame_filename = f"{frame_idx:05d}.jpg"
         return str(video_dir / frame_filename)
 
     @staticmethod

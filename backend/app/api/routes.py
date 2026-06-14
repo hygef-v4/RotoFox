@@ -1,6 +1,7 @@
 import os
 import time
 from fastapi import APIRouter, UploadFile, File
+from fastapi.concurrency import run_in_threadpool
 from app.services.video_processor import VideoProcessor
 from app.services.cache_manager import CacheManager
 from app.api.websockets import ai_engine
@@ -22,14 +23,14 @@ async def upload_video(file: UploadFile = File(...)):
         content = await file.read()
         f.write(content)
         
-    # Extract frames using ffmpeg
+    # Extract frames using OpenCV (runs in threadpool to avoid blocking event loop)
     try:
-        frames_count = VideoProcessor.extract_frames(str(video_path), video_id)
+        frames_count = await run_in_threadpool(VideoProcessor.extract_frames, str(video_path), video_id)
         
-        # Load the extracted video frames into AIEngine
+        # Load the extracted video frames into AIEngine (runs in threadpool)
         # This will fail gracefully if SAM2 is not available
         try:
-            ai_engine.load_video(video_id)
+            await run_in_threadpool(ai_engine.load_video, video_id)
         except Exception as e:
             print(f"Warning: Could not load video into SAM 2: {e}")
             
