@@ -66,8 +66,16 @@ async def websocket_endpoint(websocket: WebSocket):
             elif action == "clear_clicks":
                 try:
                     if hasattr(ai_engine, "inference_state") and getattr(ai_engine, "frames_dir", None):
-                        # Reset SAM 2 state to clear all points
-                        ai_engine.inference_state = ai_engine.predictor.init_state(video_path=ai_engine.frames_dir)
+                        # Reset SAM 2 state to clear all points (prevents CUDA OOM)
+                        ai_engine.predictor.reset_state(ai_engine.inference_state)
+                        
+                        # Clear old masks from disk so UI doesn't load stale data when scrubbing
+                        mask_dir = CacheManager.get_video_dir(ai_engine.video_id) / "masks"
+                        if mask_dir.exists():
+                            import shutil
+                            shutil.rmtree(mask_dir)
+                            mask_dir.mkdir(parents=True, exist_ok=True)
+                            
                         # We also send an empty mask back so the frontend clears visually if it didn't already
                         await websocket.send_json({
                             "status": "mask_update",
