@@ -1,7 +1,7 @@
 import React, { useRef } from 'react';
 import { Upload, Download, MousePointer2, Plus, Minus, Settings, Play, Square, Trash2 } from 'lucide-react';
 import logo from '../../assets/rotofox_logo.png';
-const Toolbar = ({ clickMode, setClickMode, onVideoImport, onExportClick, onClearClicks, viewMode, setViewMode, objects, activeObjectId, setActiveObjectId, handleAddObject, handleDeleteObject }) => {
+const Toolbar = ({ clickMode, setClickMode, onVideoImport, onExportClick, onClearClicks, viewMode, setViewMode, objects, activeObjectId, setActiveObjectId, handleAddObject, handleDeleteObject, onSettingsClick }) => {
   const fileInputRef = useRef(null);
 
   const handleImportClick = () => {
@@ -144,7 +144,10 @@ const Toolbar = ({ clickMode, setClickMode, onVideoImport, onExportClick, onClea
           <Download size={16} />
           Export Alpha Video
         </button>
-        <button className="w-full flex items-center justify-center gap-2 bg-surfaceHover hover:bg-[#333] px-4 py-2 rounded-md transition-colors text-xs text-textSecondary">
+        <button 
+          onClick={onSettingsClick}
+          className="w-full flex items-center justify-center gap-2 bg-surfaceHover hover:bg-[#333] px-4 py-2 rounded-md transition-colors text-xs text-textSecondary"
+        >
           <Settings size={14} />
           Output Settings
         </button>

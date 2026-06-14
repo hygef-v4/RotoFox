@@ -4,7 +4,7 @@ import Toolbar from './components/sidebar/Toolbar';
 import VideoCanvas from './components/canvas/VideoCanvas';
 import TimelineController from './components/timeline/TimelineController';
 import { useAIEngine } from './hooks/useAIEngine';
-import { X, CheckCircle, AlertCircle, Download, Film } from 'lucide-react';
+import { X, CheckCircle, AlertCircle, Download, Film, Settings } from 'lucide-react';
 
 const OBJECT_COLORS = [
   '#FF3B30', // Red
@@ -35,7 +35,11 @@ function App() {
   const [showExportModal, setShowExportModal] = useState(false);
   const [exportFormat, setExportFormat] = useState('mp4');
   const [exportType, setExportType] = useState('solid');
+  const [exportPath, setExportPath] = useState('');
   const [exportBgColor, setExportBgColor] = useState('green'); // green, blue, black, white
+  const [exportResolution, setExportResolution] = useState('original'); // original, 1080p, 720p
+  const [exportFps, setExportFps] = useState('original'); // original, 24, 30, 60
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
 
   // View Mode
   const [viewMode, setViewMode] = useState('overlay'); // overlay, isolated
@@ -209,6 +213,7 @@ function App() {
             setClickMode={setClickMode} 
             onVideoImport={handleVideoImport}
             onExportClick={() => setShowExportModal(true)}
+            onSettingsClick={() => setShowSettingsModal(true)}
             onClearClicks={handleClearClicks}
             viewMode={viewMode}
             setViewMode={setViewMode}
@@ -318,10 +323,12 @@ function App() {
                           className={`p-2 rounded-lg border text-left transition-all ${exportType === t.id ? 'bg-orange-500/20 border-orange-500 text-orange-400' : 'bg-[#222] border-[#333] hover:border-[#444] text-textSecondary'}`}
                         >
                           <div className="text-[11px] font-semibold text-textPrimary">{t.label}</div>
-                          <div className="text-[9px] text-textSecondary mt-0.5 leading-tight">{t.desc}</div>
+                          <div className="text-[9px] mt-0.5 opacity-70">{t.desc}</div>
                         </button>
                       ))}
                     </div>
+                  </div>
+
                   </div>
 
                   {exportType === 'solid' && (
@@ -347,17 +354,16 @@ function App() {
                       </div>
                     </div>
                   )}
-                </div>
 
-                <button
-                  type="button"
-                  onClick={() => startExport({ format: exportFormat, type: exportType, bg_color: exportBgColor, total_frames: totalFrames })}
-                  className="w-full mt-4 bg-orange-500 hover:bg-orange-600 text-white font-semibold py-2.5 rounded-lg transition-colors flex items-center justify-center gap-2"
-                >
-                  Start Exporting
-                </button>
-              </div>
-            )}
+                  <button
+                    type="button"
+                    onClick={() => startExport({ format: exportFormat, type: exportType, bg_color: exportBgColor, total_frames: totalFrames, export_path: exportPath, resolution: exportResolution, fps: exportFps })}
+                    className="w-full bg-orange-500 hover:bg-orange-600 text-white font-semibold py-2.5 rounded-lg transition-colors mt-4 flex items-center justify-center gap-2"
+                  >
+                    Start Exporting
+                  </button>
+                </div>
+              )}
 
             {exportStatus === "rendering" && (
               <div className="py-6 flex flex-col items-center justify-center text-center">
@@ -411,7 +417,7 @@ function App() {
 
                 <button
                   type="button"
-                  onClick={() => startExport({ format: exportFormat, type: exportType, total_frames: totalFrames })}
+                  onClick={() => startExport({ format: exportFormat, type: exportType, bg_color: exportBgColor, total_frames: totalFrames, export_path: exportPath, resolution: exportResolution, fps: exportFps })}
                   className="w-full bg-orange-500 hover:bg-orange-600 text-white font-semibold py-2.5 rounded-lg transition-colors mb-2"
                 >
                   Retry
@@ -428,6 +434,73 @@ function App() {
                 </button>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {showSettingsModal && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 animate-fade-in">
+          <div className="bg-[#171717] border border-[#333] rounded-xl w-[450px] p-6 shadow-2xl relative">
+            <button 
+              onClick={() => setShowSettingsModal(false)}
+              className="absolute top-4 right-4 text-textSecondary hover:text-textPrimary transition-colors"
+            >
+              <X size={20} />
+            </button>
+
+            <h3 className="text-xl font-bold mb-6 text-textPrimary flex items-center gap-2">
+              <Settings size={22} className="text-orange-500" />
+              Output Settings
+            </h3>
+
+            <div className="space-y-5">
+              <div>
+                <label className="block text-xs font-semibold text-textSecondary uppercase mb-1">Export Folder Path</label>
+                <input 
+                  type="text" 
+                  value={exportPath}
+                  onChange={(e) => setExportPath(e.target.value)}
+                  placeholder="e.g. D:\Videos\RotoFox (Leave blank for Downloads)"
+                  className="w-full bg-[#222] border border-[#333] rounded-lg p-2 text-sm text-textPrimary focus:border-orange-500 focus:outline-none transition-colors placeholder-[#555]"
+                />
+                <p className="text-[10px] text-textSecondary mt-1">If blank, exports will be saved to your Downloads/RotoFox Exports folder.</p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-textSecondary uppercase mb-1">Resolution</label>
+                <select 
+                  value={exportResolution}
+                  onChange={(e) => setExportResolution(e.target.value)}
+                  className="w-full bg-[#222] border border-[#333] rounded-lg p-2 text-sm text-textPrimary focus:border-orange-500 focus:outline-none transition-colors"
+                >
+                  <option value="original">Original (Match Video)</option>
+                  <option value="1080p">1080p (1920x1080)</option>
+                  <option value="720p">720p (1280x720)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-textSecondary uppercase mb-1">Framerate (FPS)</label>
+                <select 
+                  value={exportFps}
+                  onChange={(e) => setExportFps(e.target.value)}
+                  className="w-full bg-[#222] border border-[#333] rounded-lg p-2 text-sm text-textPrimary focus:border-orange-500 focus:outline-none transition-colors"
+                >
+                  <option value="original">Original (25 fps approx)</option>
+                  <option value="24">24 FPS (Cinematic)</option>
+                  <option value="30">30 FPS</option>
+                  <option value="60">60 FPS (Smooth)</option>
+                </select>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setShowSettingsModal(false)}
+              className="w-full mt-6 bg-white hover:bg-gray-200 text-black font-semibold py-2 rounded-lg transition-colors"
+            >
+              Save Settings
+            </button>
           </div>
         </div>
       )}

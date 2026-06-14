@@ -279,6 +279,20 @@ class AIEngine:
         export_type = settings.get("type", "alpha")
         bg_color_str = settings.get("bg_color", "green")
         total_frames = settings.get("total_frames", self.state.total_frames or 100)
+        export_path_str = settings.get("export_path", "").strip()
+        resolution_str = settings.get("resolution", "original")
+        fps_str = settings.get("fps", "original")
+        
+        try:
+            fps = float(fps_str) if fps_str != "original" else 25.0
+        except ValueError:
+            fps = 25.0
+            
+        export_w, export_h = self.video_width, self.video_height
+        if resolution_str == "1080p":
+            export_w, export_h = 1920, 1080
+        elif resolution_str == "720p":
+            export_w, export_h = 1280, 720
         
         # Parse background color for Solid mode (OpenCV uses BGR)
         bg_colors = {
@@ -294,23 +308,28 @@ class AIEngine:
             return
             
         output_filename = f"rotofox_export_{int(time.time())}.{export_format}"
-        output_path = str(CacheManager.get_video_dir(self.video_id).parent / output_filename)
+        
+        if export_path_str:
+            export_dir = Path(export_path_str)
+        else:
+            # Default to Downloads/RotoFox Exports
+            export_dir = Path.home() / "Downloads" / "RotoFox Exports"
+            
+        export_dir.mkdir(parents=True, exist_ok=True)
+        output_path = str(export_dir / output_filename)
         
         video_dir = CacheManager.get_video_dir(self.video_id)
         mask_dir = video_dir / "masks"
         
-        print(f"AI Engine: Exporting project to {output_path} (Type: {export_type}, BG: {bg_color_str})...")
+        print(f"AI Engine: Exporting project to {output_path} (Type: {export_type}, BG: {bg_color_str}, Res: {export_w}x{export_h}, FPS: {fps})...")
         
         try:
-            # Assume 25 FPS as default for export
-            fps = 25.0
-            
             if export_format == "webm":
                 fourcc = cv2.VideoWriter_fourcc(*'vp80')
             else:
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                 
-            writer = cv2.VideoWriter(output_path, fourcc, fps, (self.video_width, self.video_height))
+            writer = cv2.VideoWriter(output_path, fourcc, fps, (export_w, export_h))
             
             for i in range(total_frames):
                 frame_path = video_dir / f"{i:05d}.jpg"
@@ -324,12 +343,19 @@ class AIEngine:
                     if img is not None:
                         out_frame = img
 
-                # Read mask
+                # Read mask using alpha channel since it's an RGBA image
                 mask = np.zeros((self.video_height, self.video_width), dtype=np.uint8)
                 if mask_path.exists():
-                    m = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-                    if m is not None:
-                        mask = m
+                    m = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
+                    if m is not None and len(m.shape) == 3 and m.shape[2] == 4:
+                        mask = m[:, :, 3] # Extract alpha channel
+                    elif m is not None:
+                        mask = cv2.cvtColor(m, cv2.COLOR_BGR2GRAY)
+                
+                # Resize if needed
+                if export_w != self.video_width or export_h != self.video_height:
+                    out_frame = cv2.resize(out_frame, (export_w, export_h), interpolation=cv2.INTER_LINEAR)
+                    mask = cv2.resize(mask, (export_w, export_h), interpolation=cv2.INTER_NEAREST)
 
                 # Render logic
                 if export_type == "alpha":

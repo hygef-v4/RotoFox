@@ -180,14 +180,14 @@ export function useAIEngine() {
       setExportStatus("rendering");
       setExportProgress(0);
       setExportMessage("Initializing export...");
-      
       wsRef.current.send(JSON.stringify({
         action: 'export',
         video_id: videoId || 'unknown',
         format: settings.format,
         type: settings.type,
         bg_color: settings.bg_color,
-        total_frames: settings.total_frames
+        total_frames: settings.total_frames,
+        export_path: settings.export_path
       }));
     }
   }, [videoId]);
