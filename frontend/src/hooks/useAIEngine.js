@@ -28,20 +28,26 @@ export function useAIEngine() {
   const wsRef = useRef(null);
 
   useEffect(() => {
-    let ws = null;
     let reconnectTimer = null;
-    let reconnectDelay = 1000; // Start at 1s, double on each failure
+    let reconnectDelay = 1000;
     let isMounted = true;
 
     function connect() {
       if (!isMounted) return;
       
-      ws = new WebSocket(WS_URL);
+      // Close any existing connection before creating a new one
+      if (wsRef.current) {
+        try { wsRef.current.close(); } catch(e) { /* ignore */ }
+        wsRef.current = null;
+      }
+      
+      const ws = new WebSocket(WS_URL);
       
       ws.onopen = () => {
         console.log('Connected to AI Engine Backend');
+        wsRef.current = ws;  // Only set ref when actually OPEN
         setIsConnected(true);
-        reconnectDelay = 1000; // reset on success
+        reconnectDelay = 1000;
         if (videoIdRef.current) {
           console.log('Restoring video session on reconnect:', videoIdRef.current);
           ws.send(JSON.stringify({
@@ -79,9 +85,8 @@ export function useAIEngine() {
           setExportStatus("error");
           setExportMessage(data.message || "Failed to export");
         } else if (data.status === "error") {
-          console.error("Backend error:", data.message);
-          alert("AI Engine Error: " + data.message);
-        } else if (data.status === "mask_update" || data.status === "received" || data.status === "tracking") {
+          console.error("AI Engine Error:", data.message);
+        } else if (data.status === "mask_update" || data.status === "received") {
           if (data.mask_base64 !== undefined) {
             console.log("Received mask base64, length:", data.mask_base64 ? data.mask_base64.length : 0);
             setMaskImage(data.mask_base64);
@@ -91,13 +96,17 @@ export function useAIEngine() {
 
       ws.onclose = () => {
         console.log('Disconnected from AI Engine');
+        // Only clear ref if this WS is still the current one
+        if (wsRef.current === ws) {
+          wsRef.current = null;
+        }
         setIsConnected(false);
         setIsTracking(false);
-        wsRef.current = null;
 
         // Auto-reconnect
         if (isMounted) {
           console.log(`Reconnecting in ${reconnectDelay / 1000}s...`);
+          clearTimeout(reconnectTimer);
           reconnectTimer = setTimeout(() => {
             reconnectDelay = Math.min(reconnectDelay * 2, 10000);
             connect();
@@ -105,11 +114,10 @@ export function useAIEngine() {
         }
       };
 
-      ws.onerror = () => {
-        // onclose will fire after this, which handles reconnect
+      ws.onerror = (err) => {
+        console.warn('WebSocket error, will reconnect on close');
+        // onclose will fire after this
       };
-
-      wsRef.current = ws;
     }
 
     connect();
@@ -117,18 +125,26 @@ export function useAIEngine() {
     return () => {
       isMounted = false;
       clearTimeout(reconnectTimer);
-      ws?.close();
+      if (wsRef.current) {
+        try { wsRef.current.close(); } catch(e) { /* ignore */ }
+        wsRef.current = null;
+      }
     };
   }, []);
 
-  const sendClick = useCallback((coords, mode, frameIdx) => {
+  const sendClick = useCallback((pointsData, boxesData, frameIdx) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
+      const payload = {
         action: 'click',
-        type: mode,
-        coords: coords,
-        frame_idx: frameIdx
-      }));
+        frame_idx: frameIdx,
+        points: pointsData.map(p => [p.x, p.y]),
+        labels: pointsData.map(p => p.mode === 'add' ? 1 : 0),
+        box: boxesData.length > 0 ? [boxesData[0].x1, boxesData[0].y1, boxesData[0].x2, boxesData[0].y2] : null
+      };
+      console.log('Sending click payload:', JSON.stringify(payload));
+      wsRef.current.send(JSON.stringify(payload));
+    } else {
+      console.warn('WebSocket not open, cannot send click');
     }
   }, []);
 
@@ -199,13 +215,33 @@ export function useAIEngine() {
       if (data.status === 'success') {
         console.log(`Backend ready: ${data.frames_count} frames extracted. Video ID: ${data.video_id}`);
         setVideoId(data.video_id);
-        // Tell backend WebSocket handler which video this session is for
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({
-            action: 'set_video_id',
-            video_id: data.video_id
-          }));
+        videoIdRef.current = data.video_id;  // Update ref immediately for reconnect
+        
+        // Send set_video_id to WebSocket, retry if not open yet
+        const sendVideoId = () => {
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({
+              action: 'set_video_id',
+              video_id: data.video_id
+            }));
+            console.log('Sent set_video_id to WebSocket');
+            return true;
+          }
+          return false;
+        };
+        
+        if (!sendVideoId()) {
+          // WS not open yet, retry a few times
+          let retries = 0;
+          const retryInterval = setInterval(() => {
+            retries++;
+            if (sendVideoId() || retries >= 10) {
+              clearInterval(retryInterval);
+              if (retries >= 10) console.warn('Could not send set_video_id after 10 retries');
+            }
+          }, 500);
         }
+        
         return data;
       } else {
         console.error("Backend upload failed:", data.message);

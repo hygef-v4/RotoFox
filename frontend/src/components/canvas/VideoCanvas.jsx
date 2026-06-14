@@ -28,6 +28,9 @@ const VideoCanvas = ({
   // Stores committed selection boxes: [{x1,y1,x2,y2}]
   const boxesRef = useRef([]);
 
+  // Track previous frame to detect actual frame changes
+  const prevFrameRef = useRef(currentFrame);
+
   // Always-current refs so stable callbacks never go stale
   const clickModeRef = useRef(clickMode);
   useEffect(() => { clickModeRef.current = clickMode; }, [clickMode]);
@@ -133,12 +136,24 @@ const VideoCanvas = ({
     });
   }, [viewMode]); // Re-draw when view mode changes
 
-  // ── Clear all points when clearSignal changes ─────────────────────────────
+  // ── Clear all points when clearSignal fires ────────────────────────────────
   useEffect(() => {
     clickPointsRef.current = [];
     boxesRef.current = [];
     drawCanvas();
-  }, [clearSignal, drawCanvas]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clearSignal]);
+
+  // ── Clear points when user navigates to a different frame ─────────────────
+  useEffect(() => {
+    if (prevFrameRef.current !== currentFrame) {
+      clickPointsRef.current = [];
+      boxesRef.current = [];
+      prevFrameRef.current = currentFrame;
+      drawCanvas();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentFrame]);
 
   // ── Sync video play / pause ───────────────────────────────────────────────
   useEffect(() => {
@@ -231,8 +246,8 @@ const VideoCanvas = ({
     if (!canvas) return { x: 0, y: 0 };
     const rect = canvas.getBoundingClientRect();
     return {
-      x: (e.clientX - rect.left) / rect.width,
-      y: (e.clientY - rect.top) / rect.height,
+      x: Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)),
+      y: Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height)),
     };
   };
 
@@ -247,7 +262,7 @@ const VideoCanvas = ({
       clickPointsRef.current = [...clickPointsRef.current, { x, y, mode }];
       drawCanvas();
       // Notify parent (sends to WebSocket)
-      onCanvasClickRef.current?.([x, y], mode);
+      onCanvasClickRef.current?.(clickPointsRef.current, boxesRef.current);
     } else {
       // box mode: start drag
       isDraggingRef.current = true;
@@ -282,7 +297,7 @@ const VideoCanvas = ({
       // Save box visually
       boxesRef.current = [...boxesRef.current, box];
       // Notify parent
-      onCanvasClickRef.current?.([box.x1, box.y1, box.x2, box.y2], 'box');
+      onCanvasClickRef.current?.(clickPointsRef.current, boxesRef.current);
     }
 
     dragStartRef.current = null;

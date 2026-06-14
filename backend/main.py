@@ -23,5 +23,7 @@ if __name__ == "__main__":
         host="127.0.0.1", 
         port=8000, 
         reload=True,
-        reload_excludes=["cache_workspace/*", "**/cache_workspace/**"]
+        reload_excludes=["cache_workspace/*", "**/cache_workspace/**"],
+        ws_ping_interval=30,
+        ws_ping_timeout=300
     )

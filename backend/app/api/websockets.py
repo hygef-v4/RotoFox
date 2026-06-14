@@ -40,8 +40,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 ai_engine.state.request_cancel()
                 
             elif action == "click":
-                coords = data.get("coords")
-                mode = data.get("type", "add")
+                points = data.get("points", [])
+                labels = data.get("labels", [])
+                box = data.get("box", None)
                 frame_idx = data.get("frame_idx", 0)
                 
                 try:
@@ -49,8 +50,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     mask_b64 = await run_in_threadpool(
                         ai_engine.add_point_or_box,
                         frame_idx=frame_idx, 
-                        coords=coords, 
-                        mode=mode, 
+                        points=points,
+                        labels=labels,
+                        box=box, 
                         width=ai_engine.video_width, 
                         height=ai_engine.video_height
                     )

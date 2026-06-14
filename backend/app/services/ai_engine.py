@@ -74,6 +74,15 @@ class AIEngine:
             self.video_width, self.video_height = 1280, 720
 
         print(f"AIEngine: Initializing state for video {video_id}")
+        
+        # Free up previous state memory before loading new one
+        if self.inference_state is not None:
+            print("AIEngine: Clearing previous inference state to free VRAM.")
+            del self.inference_state
+            self.inference_state = None
+            if hasattr(self, 'device') and self.device.type == "cuda":
+                torch.cuda.empty_cache()
+
         if hasattr(self, 'device') and self.device.type == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 self.inference_state = self.predictor.init_state(video_path=str(video_dir))
@@ -83,56 +92,44 @@ class AIEngine:
             self.predictor.reset_state(self.inference_state)
         self.video_id = video_id
 
-    def add_point_or_box(self, frame_idx: int, coords: list, mode: str, width: int, height: int):
-        print(f"AIEngine: add_point_or_box. Frame: {frame_idx}, Coords: {coords}, Mode: {mode}, Scale: {width}x{height}")
+    def add_point_or_box(self, frame_idx: int, points: list, labels: list, box: list, width: int, height: int):
+        print(f"AIEngine: add_point_or_box. Frame: {frame_idx}, Points: {len(points) if points else 0}, Box: {'Yes' if box else 'No'}, Scale: {width}x{height}")
         if not self.inference_state:
             raise RuntimeError("No video loaded into AI engine.")
 
-        # coords is relative [0..1]. SAM2 needs absolute pixel coords.
-        # Scale to image dimensions
-        if mode in ['add', 'remove']:
-            x, y = coords[0] * width, coords[1] * height
-            points = np.array([[x, y]], dtype=np.float32)
-            labels = np.array([1 if mode == 'add' else 0], np.int32)
+        abs_points, abs_labels, abs_box = None, None, None
+
+        if points and labels and len(points) > 0:
+            abs_points = np.array([[p[0] * width, p[1] * height] for p in points], dtype=np.float32)
+            abs_labels = np.array(labels, np.int32)
             
-            if hasattr(self, 'device') and self.device.type == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
-                with torch.autocast("cuda", dtype=torch.bfloat16):
-                    _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
-                        inference_state=self.inference_state,
-                        frame_idx=frame_idx,
-                        obj_id=self.obj_id,
-                        points=points,
-                        labels=labels
-                    )
-            else:
+        if box and len(box) == 4:
+            abs_box = np.array([box[0] * width, box[1] * height, box[2] * width, box[3] * height], dtype=np.float32)
+
+        if abs_points is None and abs_box is None:
+            raise ValueError("No valid points or box provided")
+
+        if hasattr(self, 'device') and self.device.type == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
+            with torch.autocast("cuda", dtype=torch.bfloat16):
                 _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
                     inference_state=self.inference_state,
                     frame_idx=frame_idx,
                     obj_id=self.obj_id,
-                    points=points,
-                    labels=labels
-                )
-        elif mode == 'box':
-            x1, y1, x2, y2 = coords[0] * width, coords[1] * height, coords[2] * width, coords[3] * height
-            box = np.array([x1, y1, x2, y2], dtype=np.float32)
-            print(f"AIEngine: Prompt box scaled coordinates: [{x1}, {y1}, {x2}, {y2}]")
-            if hasattr(self, 'device') and self.device.type == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
-                with torch.autocast("cuda", dtype=torch.bfloat16):
-                    _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
-                        inference_state=self.inference_state,
-                        frame_idx=frame_idx,
-                        obj_id=self.obj_id,
-                        box=box
-                    )
-            else:
-                _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
-                    inference_state=self.inference_state,
-                    frame_idx=frame_idx,
-                    obj_id=self.obj_id,
-                    box=box
+                    points=abs_points,
+                    labels=abs_labels,
+                    box=abs_box,
+                    clear_old_points=True
                 )
         else:
-            raise ValueError("Invalid click mode")
+            _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
+                inference_state=self.inference_state,
+                frame_idx=frame_idx,
+                obj_id=self.obj_id,
+                points=abs_points,
+                labels=abs_labels,
+                box=abs_box,
+                clear_old_points=True
+            )
         
         # Convert mask to base64
         mask = (out_mask_logits[0] > 0.0).cpu().numpy().squeeze()

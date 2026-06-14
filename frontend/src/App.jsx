@@ -98,13 +98,14 @@ function App() {
     console.log(`Video loaded: ${actualFrames} frames, duration ${metadata.duration.toFixed(2)}s`);
   };
 
-  const handleCanvasClick = (coords, mode) => {
+  const handleCanvasClick = (pointsData, boxesData) => {
+    console.log(`handleCanvasClick: points=${pointsData.length}, boxes=${boxesData.length}, isUploading=${isUploading}, isBackendReady=${isBackendReady}`);
     if (isUploading || !isBackendReady) {
       console.warn("Ignored click: Backend is still initializing the video.");
       return;
     }
     // Send absolute frame index (current relative frame + trim offset) to the backend
-    sendClick(coords, mode, currentFrame + videoOffsetFrame);
+    sendClick(pointsData, boxesData, currentFrame + videoOffsetFrame);
   };
 
   const handlePlayToggle = (val) => {
