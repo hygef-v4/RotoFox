@@ -290,6 +290,10 @@ const VideoCanvas = ({
   // ── Mouse handlers ────────────────────────────────────────────────────────
   const handleMouseDown = useCallback((e) => {
     e.preventDefault();
+    if (isPlaying) {
+      onPlayToggle(false);
+      return;
+    }
     const { x, y } = getCoords(e);
     const mode = clickModeRef.current;
 
@@ -379,6 +383,7 @@ const VideoCanvas = ({
           muted
           loop={false}
           onLoadedMetadata={handleLoadedMetadata}
+          onLoadedData={drawCanvas}
           onSeeked={() => {
             // Need to re-draw canvas when video frame seeks, especially for isolated mode
             drawCanvas();

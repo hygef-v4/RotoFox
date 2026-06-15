@@ -35,6 +35,9 @@ const TimelineController = ({
   };
 
   const handleMouseDown = (e) => {
+    if (isPlaying && onPlayToggle) {
+      onPlayToggle(false);
+    }
     handleSeekEvent(e);
     
     const handleMouseMove = (moveEvent) => {
