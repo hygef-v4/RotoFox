@@ -34,3 +34,6 @@ Thumbs.db
 
 # Archives
 *.zip
+
+# Graphify
+graphify-out/
