@@ -1,4 +1,5 @@
-import React, { useRef, useEffect, useLayoutEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
+import { Upload, RotateCcw } from 'lucide-react';
 
 const DOT_RADIUS = 6; // px on the 1280×720 canvas
 
@@ -15,17 +16,48 @@ const VideoCanvas = ({
   onFrameChange,
   onPlayToggle,
   clearSignal,           // increments from parent to trigger clearing all dots
+  undoSignal,            // increments from parent to undo last point/box
   isUploading = false,
   viewMode = 'overlay',  // overlay, isolated
   onRequestMask,         // called during playback to sync mask with frame
   objects = [],          // Add objects prop
   activeObjectId,        // Add activeObjectId prop
   deleteObjectSignal,    // Signal to delete a specific object's points
+  onVideoImport,         // Receive onVideoImport prop
 }) => {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   const videoRef = useRef(null);
   const maskImageObjRef = useRef(null);
+
+  const [isDragActive, setIsDragActive] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const [showUndoToast, setShowUndoToast] = useState(false);
+  const toastTimeoutRef = useRef(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
+
+  // Simulated progress logic when isUploading transitions to true
+  useEffect(() => {
+    if (isUploading) {
+      setUploadProgress(10);
+      const interval = setInterval(() => {
+        setUploadProgress(prev => {
+          if (prev < 40) {
+            return prev + Math.floor(Math.random() * 5) + 2; // quick jump in upload
+          } else if (prev < 80) {
+            return prev + Math.floor(Math.random() * 3) + 1; // frame extraction
+          } else if (prev < 98) {
+            return prev + 1; // model initialization (slowest)
+          }
+          return prev;
+        });
+      }, 150);
+      return () => clearInterval(interval);
+    } else {
+      setUploadProgress(0);
+    }
+  }, [isUploading]);
 
   // Stores all committed click points: [{x, y, mode}] in normalized coords
   const clickPointsRef = useRef([]);
@@ -54,6 +86,9 @@ const VideoCanvas = ({
   const dragStartRef = useRef(null);
   const dragEndRef = useRef(null);
 
+  // Marching ants animation offset
+  const dashOffsetRef = useRef(0);
+
   // ── Stable draw function ──────────────────────────────────────────────────
   const drawCanvas = useCallback(() => {
     const canvas = canvasRef.current;
@@ -81,19 +116,31 @@ const VideoCanvas = ({
       }
     }
 
-    // 2. Committed selection boxes
+    // 2. Committed selection boxes – active box uses marching ants (Rotobrush-style)
     boxesRef.current.forEach(({ x1, y1, x2, y2, objId }) => {
       const px1 = x1 * canvas.width;
       const py1 = y1 * canvas.height;
       const pw  = (x2 - x1) * canvas.width;
       const ph  = (y2 - y1) * canvas.height;
-      
-      ctx.globalAlpha = (objId === activeObjectId) ? 1.0 : 0.4;
+      const isActive = objId === activeObjectId;
+
+      ctx.globalAlpha = isActive ? 1.0 : 0.4;
+      ctx.lineWidth = isActive ? 2.5 : 1.5;
+
+      if (isActive) {
+        // Marching ants animated dashes
+        ctx.setLineDash([8, 4]);
+        ctx.lineDashOffset = -dashOffsetRef.current;
+      } else {
+        ctx.setLineDash([4, 3]);
+        ctx.lineDashOffset = 0;
+      }
+
       ctx.strokeStyle = '#f97316';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([]);
       ctx.strokeRect(px1, py1, pw, ph);
-      ctx.fillStyle = 'rgba(249,115,22,0.12)';
+      ctx.setLineDash([]);
+      ctx.lineDashOffset = 0;
+      ctx.fillStyle = isActive ? 'rgba(249,115,22,0.14)' : 'rgba(249,115,22,0.06)';
       ctx.fillRect(px1, py1, pw, ph);
       ctx.globalAlpha = 1.0;
     });
@@ -195,6 +242,55 @@ const VideoCanvas = ({
     drawCanvas();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clearSignal]);
+
+  // ── Undo last point/box when undoSignal fires ────────────────────────────
+  useEffect(() => {
+    if (!undoSignal) return; // skip initial mount (undoSignal = 0)
+
+    // Trigger undo toast
+    setShowUndoToast(true);
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    toastTimeoutRef.current = setTimeout(() => {
+      setShowUndoToast(false);
+    }, 2000);
+
+    // Priority: undo last box of activeObject, then last click point
+    const lastBoxIdx = [...boxesRef.current].map((b, i) => ({ b, i })).reverse().find(({ b }) => b.objId === activeObjectId);
+    if (lastBoxIdx !== undefined) {
+      boxesRef.current = boxesRef.current.filter((_, i) => i !== lastBoxIdx.i);
+    } else {
+      // Undo last click point of active object
+      const pts = clickPointsRef.current;
+      for (let i = pts.length - 1; i >= 0; i--) {
+        if (pts[i].objId === activeObjectId) {
+          clickPointsRef.current = [...pts.slice(0, i), ...pts.slice(i + 1)];
+          break;
+        }
+      }
+    }
+
+    drawCanvas();
+    // Re-send remaining points to backend so mask is recomputed
+    const filteredPoints = clickPointsRef.current.filter(p => p.objId === activeObjectId);
+    const filteredBoxes  = boxesRef.current.filter(b => b.objId === activeObjectId);
+    onCanvasClickRef.current?.(filteredPoints, filteredBoxes);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [undoSignal]);
+
+  // ── Marching ants animation loop (runs always, drives dashOffsetRef) ────────
+  useEffect(() => {
+    let animId;
+    const tick = () => {
+      dashOffsetRef.current = (dashOffsetRef.current + 0.5) % 24;
+      // Only force-redraw when not playing (playback rAF already calls drawCanvas)
+      if (boxesRef.current.length > 0 && !isPlayingRef.current) {
+        drawCanvas();
+      }
+      animId = requestAnimationFrame(tick);
+    };
+    animId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(animId);
+  }, [drawCanvas]);
 
   // ── Remove points for a specific object when deleteObjectSignal fires ──────
   useEffect(() => {
@@ -313,6 +409,44 @@ const VideoCanvas = ({
     drawCanvas();
   }, [clickMode, drawCanvas]);
 
+  // ── Drag & drop handlers ──────────────────────────────────────────────────
+  const handleDrag = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") {
+      setIsDragActive(true);
+    } else if (e.type === "dragleave") {
+      setIsDragActive(false);
+    }
+  }, []);
+
+  const handleDrop = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragActive(false);
+
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      const file = e.dataTransfer.files[0];
+      const validTypes = ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime'];
+      if (validTypes.includes(file.type) || file.type.startsWith('video/')) {
+        const url = URL.createObjectURL(file);
+        onVideoImport?.(url, file);
+      }
+    }
+  }, [onVideoImport]);
+
+  const handleBrowseClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const url = URL.createObjectURL(file);
+      onVideoImport?.(url, file);
+    }
+  };
+
   // ── Helpers ───────────────────────────────────────────────────────────────
   const getCoords = (e) => {
     const canvas = canvasRef.current;
@@ -327,6 +461,7 @@ const VideoCanvas = ({
   // ── Mouse handlers ────────────────────────────────────────────────────────
   const handleMouseDown = useCallback((e) => {
     e.preventDefault();
+    if (!videoUrl) return; // Block clicks if no video is imported
     // FIX Bug 3: Use isPlayingRef to avoid stale closure (isPlaying not in deps)
     if (isPlayingRef.current) {
       onPlayToggleRef.current?.(false);
@@ -350,7 +485,7 @@ const VideoCanvas = ({
       dragEndRef.current = { x, y };
       drawCanvas();
     }
-  }, [drawCanvas, activeObjectId]);
+  }, [drawCanvas, activeObjectId, videoUrl]);
 
   const handleMouseMove = useCallback((e) => {
     if (!isDraggingRef.current) return;
@@ -410,7 +545,13 @@ const VideoCanvas = ({
   return (
     <div
       ref={containerRef}
-      className="relative w-full h-full bg-black overflow-hidden"
+      className={`relative w-full h-full bg-[#040406] overflow-hidden transition-all duration-300 ${
+        isDragActive ? 'bg-blue-600/[0.03]' : ''
+      }`}
+      onDragEnter={!videoUrl ? handleDrag : undefined}
+      onDragOver={!videoUrl ? handleDrag : undefined}
+      onDragLeave={!videoUrl ? handleDrag : undefined}
+      onDrop={!videoUrl ? handleDrop : undefined}
     >
       {videoUrl ? (
         <video
@@ -428,9 +569,56 @@ const VideoCanvas = ({
           }}
         />
       ) : (
-        <div className="absolute inset-0 flex flex-col items-center justify-center text-textSecondary/50 pointer-events-none select-none">
-          <span className="font-mono mb-2 text-lg">No Video Loaded</span>
-          <span className="text-sm">Import a video to begin</span>
+        <div className={`absolute inset-0 flex flex-col items-center justify-center p-8 transition-all duration-300 ${
+          isDragActive ? 'scale-102 bg-blue-500/[0.02]' : ''
+        }`}>
+          <div 
+            onClick={handleBrowseClick}
+            tabIndex={0}
+            role="button"
+            aria-label="Drag and drop zone to upload video files. Click or press Enter to choose a file."
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                handleBrowseClick();
+              }
+            }}
+            className={`max-w-md w-full border-2 border-dashed rounded-2xl p-10 flex flex-col items-center text-center transition-all duration-300 cursor-pointer focus-visible:ring-2 focus-visible:ring-orange-500/50 focus-visible:outline-none ${
+              isDragActive 
+                ? 'border-blue-500 bg-blue-500/[0.04] shadow-[0_0_40px_rgba(59,130,246,0.14)] scale-102' 
+                : 'border-white/[0.08] bg-white/[0.01] hover:border-white/[0.15] hover:bg-white/[0.02] hover:shadow-[0_0_20px_rgba(255,255,255,0.02)]'
+            }`}
+          >
+            <div className="w-14 h-14 rounded-2xl bg-orange-500/10 border border-orange-500/30 flex items-center justify-center text-orange-500 mb-6 shadow-md">
+              <Upload size={24} />
+            </div>
+            
+            <h3 className="text-base font-bold text-textPrimary mb-1.5">Import Video File</h3>
+            <p className="text-xs text-textSecondary/70 mb-6 max-w-[280px] leading-relaxed">
+              Drag &amp; drop video here, or select a file from your computer
+            </p>
+            
+            <input 
+              type="file" 
+              accept="video/mp4,video/webm,video/ogg,video/quicktime" 
+              ref={fileInputRef} 
+              onChange={handleFileChange} 
+              className="hidden" 
+            />
+            
+            <button
+              onClick={(e) => { e.stopPropagation(); handleBrowseClick(); }}
+              tabIndex={0}
+              aria-label="Select video file"
+              className="px-5 py-2.5 bg-gradient-to-r from-orange-500/90 to-red-500/90 hover:from-orange-500 hover:to-red-500 text-white text-xs font-bold rounded-lg border border-orange-400/20 shadow-lg shadow-orange-950/20 hover:shadow-orange-500/20 active:scale-[0.98] transition-all duration-200 focus-visible:ring-2 focus-visible:ring-orange-500/50 focus-visible:outline-none"
+            >
+              Select Video
+            </button>
+            
+            <span className="text-[10px] text-textSecondary/30 mt-6 font-mono uppercase tracking-widest">
+              MP4, WebM, MOV, Ogg supported
+            </span>
+          </div>
         </div>
       )}
 
@@ -444,12 +632,23 @@ const VideoCanvas = ({
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseLeave}
-        className="absolute inset-0 w-full h-full object-contain z-10"
+        tabIndex={videoUrl ? 0 : -1}
+        aria-label="Video segmentation workspace canvas. Use click to place points or drag to draw boxes."
+        className={`absolute inset-0 w-full h-full object-contain z-10 focus-visible:ring-2 focus-visible:ring-orange-500/50 focus-visible:outline-none ${!videoUrl ? 'pointer-events-none' : ''}`}
         style={{
-          cursor: clickMode === 'box' ? 'crosshair' : 'cell',
+          cursor: !videoUrl ? 'default' : (clickMode === 'box' ? 'crosshair' : 'cell'),
           touchAction: 'none',
         }}
       />
+
+
+      {/* Undo Toast: temporary notification for Ctrl+Z */}
+      {showUndoToast && (
+        <div className="absolute top-4 right-4 z-20 flex items-center gap-2 bg-[#17171a]/95 border border-white/[0.1] backdrop-blur-md px-3.5 py-2 rounded-xl shadow-lg shadow-black/50 text-xs font-semibold text-textPrimary animate-in fade-in slide-in-from-top-2 duration-300">
+          <RotateCcw size={14} className="text-orange-500" />
+          <span>Action Undone</span>
+        </div>
+      )}
 
       {/* HUD: show current mode and point count */}
       {videoUrl && !isUploading && (
@@ -467,12 +666,27 @@ const VideoCanvas = ({
         </div>
       )}
 
-      {/* Loading Overlay */}
+      {/* Loading Overlay with progress bar and staged status text */}
       {isUploading && (
-        <div className="absolute inset-0 z-30 bg-black/50 backdrop-blur-sm flex flex-col items-center justify-center text-orange-400 pointer-events-none select-none">
-          <div className="w-10 h-10 border-4 border-orange-500/20 border-t-orange-500 rounded-full animate-spin mb-3"></div>
-          <span className="font-mono text-sm font-semibold tracking-wider">INITIALIZING SAM 2...</span>
-          <span className="text-[10px] text-textSecondary mt-1">Extracting frames and loading models</span>
+        <div className="absolute inset-0 z-30 bg-[#0a0a0c]/80 backdrop-blur-md flex flex-col items-center justify-center pointer-events-none select-none">
+          <div className="w-12 h-12 border-4 border-orange-500/10 border-t-orange-500 rounded-full animate-spin mb-4"></div>
+          
+          <span className="font-mono text-xs font-bold tracking-wider text-orange-400 uppercase">
+            {uploadProgress < 40 ? "Uploading video file..." : 
+             uploadProgress < 80 ? "Extracting frames..." : 
+             "Initializing SAM 2 AI model..."}
+          </span>
+          
+          <div className="w-64 h-1.5 bg-white/[0.08] rounded-full overflow-hidden mt-3.5 mb-2 shadow-inner border border-white/[0.03]">
+            <div 
+              className="h-full bg-gradient-to-r from-orange-500 to-red-500 transition-all duration-300 ease-out shadow-[0_0_10px_rgba(249,115,22,0.4)]"
+              style={{ width: `${uploadProgress}%` }}
+            />
+          </div>
+          
+          <span className="text-[10px] font-mono text-textSecondary font-semibold tracking-wider">
+            {uploadProgress}% Complete
+          </span>
         </div>
       )}
     </div>

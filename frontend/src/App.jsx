@@ -4,7 +4,7 @@ import Toolbar from './components/sidebar/Toolbar';
 import VideoCanvas from './components/canvas/VideoCanvas';
 import TimelineController from './components/timeline/TimelineController';
 import { useAIEngine } from './hooks/useAIEngine';
-import { X, CheckCircle, AlertCircle, Download, Film, Settings } from 'lucide-react';
+import { X, CheckCircle, AlertCircle, Download, Film, Settings, Copy } from 'lucide-react';
 
 const OBJECT_COLORS = [
   '#FF3B30', // Red
@@ -24,12 +24,12 @@ function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentFrame, setCurrentFrame] = useState(0);
   const [totalFrames, setTotalFrames] = useState(100);
-  const [trimStart, setTrimStart] = useState(0);
-  const [trimEnd, setTrimEnd] = useState(100);
-  const [videoOffsetFrame, setVideoOffsetFrame] = useState(0);
+  const videoOffsetFrame = 0;
 
   // Incrementing this number tells VideoCanvas to clear all click dots/boxes
   const [clearSignal, setClearSignal] = useState(0);
+  // Incrementing this number tells VideoCanvas to undo the last placed point/box
+  const [undoSignal, setUndoSignal] = useState(0);
 
   // Export overlay states
   const [showExportModal, setShowExportModal] = useState(false);
@@ -48,6 +48,15 @@ function App() {
   const [objects, setObjects] = useState([{ id: 1, color: OBJECT_COLORS[0], name: 'Object 1' }]);
   const [activeObjectId, setActiveObjectId] = useState(1);
   const [deleteObjectSignal, setDeleteObjectSignal] = useState(null);
+
+  const [copied, setCopied] = useState(false);
+  const handleCopyPath = () => {
+    if (exportFilePath) {
+      navigator.clipboard.writeText(exportFilePath);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
 
   const {
     isConnected,
@@ -69,7 +78,8 @@ function App() {
     requestMask,
     clearMaskCache,
     clearBackendState,
-    removeObject
+    removeObject,
+    trackedFrames
   } = useAIEngine();
 
   const [backendFramesCount, setBackendFramesCount] = useState(null);
@@ -79,9 +89,49 @@ function App() {
   const [isBackendReady, setIsBackendReady] = useState(false);
   const isBackendReadyRef = useRef(false);      // ref to avoid stale closure in handleCanvasClick
 
+  // Keyboard shortcut refs – avoid stale closures in the single keydown listener
+  const currentFrameRef_kb = useRef(0);
+  useEffect(() => { currentFrameRef_kb.current = currentFrame; }, [currentFrame]);
+  const totalFramesRef_kb = useRef(100);
+  useEffect(() => { totalFramesRef_kb.current = totalFrames; }, [totalFrames]);
+  const isTrackingRef_kb = useRef(false);
+  useEffect(() => { isTrackingRef_kb.current = isTracking; }, [isTracking]);
+  const videoOffsetFrameRef_kb = useRef(0);
+  useEffect(() => { videoOffsetFrameRef_kb.current = videoOffsetFrame; }, [videoOffsetFrame]);
+  const hasVideoRef_kb = useRef(false);
+  useEffect(() => { hasVideoRef_kb.current = !!videoUrl; }, [videoUrl]);
+
+  // Global keyboard shortcuts
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      const tag = e.target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (!hasVideoRef_kb.current) return;
+      if (isTrackingRef_kb.current) return;
+
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        const f = Math.max(0, currentFrameRef_kb.current - 1);
+        setCurrentFrame(f);
+        if (isBackendReadyRef.current && requestMask) requestMask(f + videoOffsetFrameRef_kb.current);
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        const f = Math.min(totalFramesRef_kb.current, currentFrameRef_kb.current + 1);
+        setCurrentFrame(f);
+        if (isBackendReadyRef.current && requestMask) requestMask(f + videoOffsetFrameRef_kb.current);
+      } else if (e.key === ' ') {
+        e.preventDefault();
+        setIsPlaying(prev => !prev);
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        e.preventDefault();
+        setUndoSignal(s => s + 1);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
 
-  // Sync current frame from AI tracking progress updates
   useEffect(() => {
     if (isTracking && progressData.currentFrame !== currentFrame) {
       setCurrentFrame(progressData.currentFrame);
@@ -92,7 +142,6 @@ function App() {
     setVideoUrl(url);
     setIsPlaying(false);
     setCurrentFrame(0);
-    setVideoOffsetFrame(0);
     setBackendFramesCount(null); // Reset for new video
     setIsUploading(true);
     isUploadingRef.current = true;
@@ -108,7 +157,6 @@ function App() {
       backendFramesCountRef.current = result.frames_count; // update ref immediately (sync)
       setBackendFramesCount(result.frames_count);
       setTotalFrames(result.frames_count);
-      setTrimEnd(result.frames_count);
       isBackendReadyRef.current = true;   // update ref immediately before setState batch
       setIsBackendReady(true);
     }
@@ -122,10 +170,7 @@ function App() {
     // Use ref (not state) to always get the latest backendFramesCount, avoiding stale closure race condition
     const actualFrames = backendFramesCountRef.current || metadata.totalFrames;
     setTotalFrames(actualFrames);
-    setTrimStart(0);
-    setTrimEnd(actualFrames);
     setCurrentFrame(0);
-    setVideoOffsetFrame(0);
     console.log(`Video loaded: ${actualFrames} frames (backend: ${backendFramesCountRef.current}, metadata est: ${metadata.totalFrames}), duration ${metadata.duration.toFixed(2)}s`);
   };
 
@@ -156,31 +201,7 @@ function App() {
     }
   };
 
-  const handleSetTrimStart = (frame) => {
-    if (frame < trimEnd) {
-      setTrimStart(frame);
-    }
-  };
 
-  const handleSetTrimEnd = (frame) => {
-    if (frame > trimStart) {
-      setTrimEnd(frame);
-    }
-  };
-
-  const handleApplyCut = () => {
-    // non-destructive cropping: shift offset frame and shorten total frame duration
-    const newOffset = videoOffsetFrame + trimStart;
-    const newTotal = trimEnd - trimStart;
-    
-    setVideoOffsetFrame(newOffset);
-    setTotalFrames(newTotal);
-    setTrimStart(0);
-    setTrimEnd(newTotal);
-    setCurrentFrame(0);
-    setIsPlaying(false);
-    console.log(`Cut applied. New offset: ${newOffset}, Total frames: ${newTotal}`);
-  };
 
   const handleClearClicks = () => {
     setClearSignal(s => s + 1);
@@ -189,6 +210,7 @@ function App() {
   };
 
   const handleAddObject = () => {
+    if (objects.length >= 7) return;
     const newId = objects.length > 0 ? Math.max(...objects.map(o => o.id)) + 1 : 1;
     const color = OBJECT_COLORS[(newId - 1) % OBJECT_COLORS.length];
     setObjects(prev => [...prev, { id: newId, color, name: `Object ${newId}` }]);
@@ -249,12 +271,14 @@ function App() {
             onFrameChange={setCurrentFrame}
             onPlayToggle={setIsPlaying}
             clearSignal={clearSignal}
+            undoSignal={undoSignal}
             isUploading={isUploading}
             viewMode={viewMode}
             onRequestMask={requestMask}
             objects={objects}
             activeObjectId={activeObjectId}
             deleteObjectSignal={deleteObjectSignal}
+            onVideoImport={handleVideoImport}
           />
 
         }
@@ -264,14 +288,13 @@ function App() {
             totalFrames={totalFrames}
             isPlaying={isPlaying}
             isTracking={isTracking}
-            trimStart={trimStart}
-            trimEnd={trimEnd}
+            hasVideo={!!videoUrl}
+            objects={objects}
+            activeObjectId={activeObjectId}
+            trackedFrames={trackedFrames}
             onPlayToggle={() => handlePlayToggle()}
             onTrackForward={() => startTracking(totalFrames, currentFrame + videoOffsetFrame)}
             onCancelTracking={cancelTracking}
-            onSetTrimStart={handleSetTrimStart}
-            onSetTrimEnd={handleSetTrimEnd}
-            onApplyCut={handleApplyCut}
             onSeek={handleSeek}
           />
         }
@@ -402,9 +425,24 @@ function App() {
                 <h4 className="font-bold text-textPrimary text-lg mb-1">Export Successful!</h4>
                 <p className="text-xs text-textSecondary mb-6">{exportMessage}</p>
 
-                <div className="w-full bg-[#222] border border-[#333] rounded-lg p-3 text-left font-mono text-[10px] text-textSecondary overflow-x-auto select-all mb-6">
-                  <span className="text-textSecondary block mb-1 uppercase font-sans font-bold tracking-wider">Saved Path:</span>
-                  {exportFilePath}
+                <div className="w-full flex items-center justify-between gap-3 bg-[#222] border border-[#333] rounded-lg p-3 mb-6">
+                  <div className="text-left font-mono text-[10px] text-textSecondary overflow-x-auto select-all flex-1 pr-2">
+                    <span className="text-textSecondary block mb-1 uppercase font-sans font-bold tracking-wider">Saved Path:</span>
+                    {exportFilePath}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleCopyPath}
+                    aria-label="Copy export file path to clipboard"
+                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[10px] font-bold transition-all duration-200 border flex-shrink-0 ${
+                      copied 
+                        ? 'bg-green-500/10 border-green-500/30 text-green-400 font-sans' 
+                        : 'bg-white/[0.03] border-white/[0.06] hover:bg-white/[0.08] text-textSecondary hover:text-textPrimary focus-visible:ring-2 focus-visible:ring-orange-500/50 focus-visible:outline-none font-sans'
+                    }`}
+                  >
+                    <Copy size={11} />
+                    {copied ? 'Copied!' : 'Copy Path'}
+                  </button>
                 </div>
 
                 <button

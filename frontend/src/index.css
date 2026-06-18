@@ -1,10 +1,13 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
   body {
-    @apply bg-background text-textPrimary antialiased m-0 overflow-hidden font-sans;
+    @apply bg-background text-textPrimary antialiased m-0 overflow-hidden;
+    font-family: 'Inter', sans-serif;
   }
 }
 
@@ -22,4 +25,18 @@
 }
 ::-webkit-scrollbar-thumb:hover {
   background: #555;
+}
+
+@keyframes pulse-subtle {
+  0%, 100% {
+    opacity: 0.95;
+    box-shadow: 0 10px 15px -3px rgba(249, 115, 22, 0.15), 0 4px 6px -4px rgba(249, 115, 22, 0.15);
+  }
+  50% {
+    opacity: 1;
+    box-shadow: 0 12px 18px -3px rgba(249, 115, 22, 0.3), 0 6px 8px -4px rgba(249, 115, 22, 0.3);
+  }
+}
+.animate-pulse-subtle {
+  animation: pulse-subtle 4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }

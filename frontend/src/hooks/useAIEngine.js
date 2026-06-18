@@ -19,6 +19,8 @@ export function useAIEngine() {
     progress: 0
   });
 
+  const [trackedFrames, setTrackedFrames] = useState([]);
+
   // Export states
   const [exportProgress, setExportProgress] = useState(0);
   const [exportStatus, setExportStatus] = useState("idle"); // idle, rendering, completed, error
@@ -70,6 +72,7 @@ export function useAIEngine() {
           }));
           if (data.mask_base64) {
             maskCacheRef.current.set(data.frame, data.mask_base64);
+            setTrackedFrames(Array.from(maskCacheRef.current.keys()));
             setMaskImage(data.mask_base64);
           }
         } else if (data.status === "completed" || data.status === "cancelled") {
@@ -93,6 +96,7 @@ export function useAIEngine() {
             const frameIdx = data.frame ?? data.echo?.frame_idx;
             if (frameIdx !== undefined && data.mask_base64) {
               maskCacheRef.current.set(frameIdx, data.mask_base64);
+              setTrackedFrames(Array.from(maskCacheRef.current.keys()));
             }
             setMaskImage(data.mask_base64);
           }
@@ -210,6 +214,7 @@ export function useAIEngine() {
 
   const clearMaskCache = useCallback(() => {
     maskCacheRef.current.clear();
+    setTrackedFrames([]);
     setMaskImage(null);
   }, []);
 
@@ -309,6 +314,7 @@ export function useAIEngine() {
     requestMask,
     clearMaskCache,
     clearBackendState,
-    removeObject
+    removeObject,
+    trackedFrames
   };
 };
