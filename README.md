@@ -46,24 +46,6 @@ RotoFox uses a **Local Hybrid Architecture** where a React frontend communicates
 
 ![System Architecture Diagram](docs/architecture_diagram.png)
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    FRONTEND  (React + Vite)                     │
-│  Canvas Player · Timeline Controller · Toolbar Sidebar          │
-└──────────────────────────┬──────────────────────────────────────┘
-           WebSocket ↓ Send │ Click Coords, Frame Index, Object ID
-           WebSocket ↑ Recv │ Mask Base64, Progress %, Export Status
-┌──────────────────────────┴──────────────────────────────────────┐
-│                BACKEND AI CORE  (FastAPI + PyTorch)             │
-│  AI Engine (SAM 2/SAM 3) · MatAnyone 2 · Video Processor       │
-└──────┬───────────────────────────────────────────┬─────────────┘
-       │ Read/Write Frame Cache                    │ CUDA Tensors
-┌──────┴────────────┐                   ┌──────────┴──────────────┐
-│   LOCAL STORAGE   │                   │     GPU COMPUTE         │
-│  SSD Frame Cache  │                   │  PyTorch + CUDA         │
-│  Mask PNG Store   │                   │  TensorRT Acceleration  │
-└───────────────────┘                   └─────────────────────────┘
-```
 
 ### Key Components
 
@@ -82,16 +64,6 @@ The end-to-end workflow from import to export:
 
 ![Processing Pipeline Diagram](docs/workflow_diagram.png)
 
-```
- Import         Prompt         SAM 2           Propagate       MatAnyone 2      Export
- Video    →    Canvas     →    Inference  →    All Frames  →   Edge Refine  →  ProRes/Luma
-  │               │               │               │                │              │
-MP4/MOV      Left Click =     Binary Mask     Memory Bank      Alpha Matte    .mov ProRes 4444
- ↓           Include (🟢)    per frame       auto-tracks      hair / blur    or PNG sequence
-Frame        Right Click =   sent to UI       object fwd      is computed
-Extraction   Exclude (🔴)   as Base64        & backward      from trimap
-             Box Draw
-```
 
 **Detailed Steps:**
 
