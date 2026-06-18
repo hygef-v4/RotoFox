@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback } from 'react';
+import React, { useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 
 const DOT_RADIUS = 6; // px on the 1280×720 canvas
 
@@ -41,6 +41,13 @@ const VideoCanvas = ({
 
   const onCanvasClickRef = useRef(onCanvasClick);
   useEffect(() => { onCanvasClickRef.current = onCanvasClick; }, [onCanvasClick]);
+
+  // FIX Bug 3: isPlaying & onPlayToggle refs to avoid stale closure in handleMouseDown
+  const isPlayingRef = useRef(isPlaying);
+  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
+
+  const onPlayToggleRef = useRef(onPlayToggle);
+  useEffect(() => { onPlayToggleRef.current = onPlayToggle; }, [onPlayToggle]);
 
   // Drag state
   const isDraggingRef = useRef(false);
@@ -150,6 +157,37 @@ const VideoCanvas = ({
     });
   }, [viewMode, activeObjectId, objects]); // Re-draw when view mode, active object, or objects array changes
 
+  // ── FIX Bug 1: Set canvas dimensions directly from video metadata ──────────
+  // Prevents React from clearing the canvas when width/height props change
+  useLayoutEffect(() => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas || !videoUrl) return;
+
+    const applyDimensions = () => {
+      if (video.videoWidth > 0) {
+        canvas.width  = video.videoWidth;
+        canvas.height = video.videoHeight;
+        drawCanvas();
+      }
+    };
+
+    video.addEventListener('loadedmetadata', applyDimensions);
+    // In case metadata is already loaded (e.g. same video re-mounted)
+    if (video.readyState >= 1) applyDimensions();
+
+    return () => video.removeEventListener('loadedmetadata', applyDimensions);
+  }, [videoUrl, drawCanvas]);
+
+  // ── FIX Bug 2: Redraw canvas when upload finishes (overlay disappears) ──────
+  useEffect(() => {
+    if (!isUploading) {
+      // Use rAF so React has flushed DOM updates before we draw
+      const id = requestAnimationFrame(() => drawCanvas());
+      return () => cancelAnimationFrame(id);
+    }
+  }, [isUploading, drawCanvas]);
+
   // ── Clear all points when clearSignal fires ────────────────────────────────
   useEffect(() => {
     clickPointsRef.current = [];
@@ -198,9 +236,8 @@ const VideoCanvas = ({
     const effectiveFps = (totalFrames && video.duration) ? (totalFrames / video.duration) : 30;
     
     const targetTime = (currentFrame + videoOffsetFrame) / effectiveFps;
-    if (Math.abs(video.currentTime - targetTime) > 0.01) {
-      video.currentTime = targetTime;
-    }
+    // FIX Bug 4: Always set currentTime (no threshold) so onSeeked always fires
+    video.currentTime = targetTime;
   }, [currentFrame, videoOffsetFrame, isPlaying, totalFrames]);
 
   // ── rAF loop while playing ────────────────────────────────────────────────
@@ -290,8 +327,9 @@ const VideoCanvas = ({
   // ── Mouse handlers ────────────────────────────────────────────────────────
   const handleMouseDown = useCallback((e) => {
     e.preventDefault();
-    if (isPlaying) {
-      onPlayToggle(false);
+    // FIX Bug 3: Use isPlayingRef to avoid stale closure (isPlaying not in deps)
+    if (isPlayingRef.current) {
+      onPlayToggleRef.current?.(false);
       return;
     }
     const { x, y } = getCoords(e);
@@ -397,10 +435,11 @@ const VideoCanvas = ({
       )}
 
       {/* Canvas: mask + dots + drag box */}
+      {/* FIX Bug 1: Static fallback width/height; actual dims set by useLayoutEffect via video metadata */}
       <canvas
         ref={canvasRef}
-        width={totalFrames ? videoRef.current?.videoWidth || 1280 : 1280}
-        height={totalFrames ? videoRef.current?.videoHeight || 720 : 720}
+        width={1280}
+        height={720}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}

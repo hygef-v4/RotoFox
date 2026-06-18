@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import MainLayout from './components/layout/MainLayout';
 import Toolbar from './components/sidebar/Toolbar';
 import VideoCanvas from './components/canvas/VideoCanvas';
@@ -73,8 +73,11 @@ function App() {
   } = useAIEngine();
 
   const [backendFramesCount, setBackendFramesCount] = useState(null);
+  const backendFramesCountRef = useRef(null); // ref to avoid stale closure in handleVideoMetadataLoaded
   const [isUploading, setIsUploading] = useState(false);
+  const isUploadingRef = useRef(false);         // ref to avoid stale closure in handleCanvasClick
   const [isBackendReady, setIsBackendReady] = useState(false);
+  const isBackendReadyRef = useRef(false);      // ref to avoid stale closure in handleCanvasClick
 
 
 
@@ -92,7 +95,9 @@ function App() {
     setVideoOffsetFrame(0);
     setBackendFramesCount(null); // Reset for new video
     setIsUploading(true);
+    isUploadingRef.current = true;
     setIsBackendReady(false);
+    isBackendReadyRef.current = false;
     clearMaskCache();  // Flush cached masks from previous video
     console.log("Importing video locally:", file.name);
 
@@ -100,36 +105,42 @@ function App() {
     const result = await uploadVideo(file);
     if (result) {
       console.log(`Video successfully loaded into SAM 2 engine. Extracted ${result.frames_count} frames.`);
+      backendFramesCountRef.current = result.frames_count; // update ref immediately (sync)
       setBackendFramesCount(result.frames_count);
       setTotalFrames(result.frames_count);
       setTrimEnd(result.frames_count);
+      isBackendReadyRef.current = true;   // update ref immediately before setState batch
       setIsBackendReady(true);
     }
+    isUploadingRef.current = false;       // update ref immediately before setState
     setIsUploading(false);
   };
 
   // Sample video logic removed for production ready state
 
   const handleVideoMetadataLoaded = (metadata) => {
-    // If backend already returned true frame count, use it. Else estimate 30fps.
-    const actualFrames = backendFramesCount || metadata.totalFrames;
+    // Use ref (not state) to always get the latest backendFramesCount, avoiding stale closure race condition
+    const actualFrames = backendFramesCountRef.current || metadata.totalFrames;
     setTotalFrames(actualFrames);
     setTrimStart(0);
     setTrimEnd(actualFrames);
     setCurrentFrame(0);
     setVideoOffsetFrame(0);
-    console.log(`Video loaded: ${actualFrames} frames, duration ${metadata.duration.toFixed(2)}s`);
+    console.log(`Video loaded: ${actualFrames} frames (backend: ${backendFramesCountRef.current}, metadata est: ${metadata.totalFrames}), duration ${metadata.duration.toFixed(2)}s`);
   };
 
   const handleCanvasClick = useCallback((pointsData, boxesData) => {
-    console.log(`handleCanvasClick: points=${pointsData.length}, boxes=${boxesData.length}, isUploading=${isUploading}, isBackendReady=${isBackendReady}`);
-    if (isUploading || !isBackendReady) {
+    // Use refs instead of state to always read the latest value (avoid stale closure)
+    const uploading = isUploadingRef.current;
+    const ready = isBackendReadyRef.current;
+    console.log(`handleCanvasClick: points=${pointsData.length}, boxes=${boxesData.length}, isUploading=${uploading}, isBackendReady=${ready}`);
+    if (uploading || !ready) {
       console.warn("Ignored click: Backend is still initializing the video.");
       return;
     }
     // Send absolute frame index (current relative frame + trim offset) to the backend
     sendClick(pointsData, boxesData, currentFrame + videoOffsetFrame, activeObjectId);
-  }, [currentFrame, videoOffsetFrame, isUploading, isBackendReady, sendClick, activeObjectId]);
+  }, [currentFrame, videoOffsetFrame, sendClick, activeObjectId]);
 
   const handlePlayToggle = (val) => {
     if (isTracking) return;

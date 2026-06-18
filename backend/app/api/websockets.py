@@ -10,6 +10,7 @@ ai_engine = AIEngine()
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     print("WebSocket connection established with client")
+    session_video_id = None   # per-connection state – prevents cross-connection contamination
     try:
         while True:
             data = await websocket.receive_json()
@@ -21,6 +22,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Removed redundant load_video call because it's already done in the POST endpoint
                 # and calling it here blocks the websocket/event loop again causing infinite reconnect loops.
                 if video_id:
+                    session_video_id = video_id        # link this connection to the video
                     ai_engine.video_id = video_id
                     print(f"WebSocket session linked to video_id: {video_id}")
                     await websocket.send_json({"status": "video_loaded", "video_id": video_id})
@@ -41,6 +43,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 ai_engine.state.request_cancel()
                 
             elif action == "click":
+                # Guard: ensure this connection is linked to a video before processing
+                if not session_video_id:
+                    print(f"Warning: click received but no video_id linked to this connection. Ignoring.")
+                    await websocket.send_json({"status": "error", "message": "No video_id linked to this WebSocket connection. Send set_video_id first."})
+                    continue
+
                 points = data.get("points", [])
                 labels = data.get("labels", [])
                 box = data.get("box", None)
