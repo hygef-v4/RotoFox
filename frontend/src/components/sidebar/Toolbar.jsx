@@ -1,7 +1,7 @@
 import React, { useRef } from 'react';
-import { Upload, Download, Plus, Minus, Square, RotateCcw, RectangleHorizontal, Settings, Trash2 } from 'lucide-react';
+import { Upload, Download, Plus, Minus, Square, RotateCcw, RectangleHorizontal, Settings, Trash2, Undo, Redo } from 'lucide-react';
 import logo from '../../assets/rotofox_logo.png';
-const Toolbar = ({ clickMode, setClickMode, onVideoImport, onExportClick, onClearClicks, viewMode, setViewMode, objects, activeObjectId, setActiveObjectId, handleAddObject, handleDeleteObject, onSettingsClick }) => {
+const Toolbar = ({ clickMode, setClickMode, onVideoImport, onExportClick, onClearClicks, onUndoClick, onRedoClick, viewMode, setViewMode, objects, activeObjectId, setActiveObjectId, handleAddObject, handleDeleteObject, onSettingsClick }) => {
   const fileInputRef = useRef(null);
 
   const handleImportClick = () => {
@@ -151,15 +151,35 @@ const Toolbar = ({ clickMode, setClickMode, onVideoImport, onExportClick, onClea
             </button>
           ))}
 
-          <button 
-            onClick={onClearClicks}
-            aria-label="Reset all selected points and boxes"
-            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg bg-white/[0.01] border border-white/[0.03] hover:bg-white/[0.05] hover:border-white/[0.08] transition-all duration-200 text-xs font-semibold text-textSecondary hover:text-textPrimary mt-1 focus-visible:ring-2 focus-visible:ring-orange-500/50 focus-visible:outline-none"
-            title="Reset selection (Clear all points and boxes. Ctrl+Z to undo last point/box instead)"
-          >
-            <RotateCcw size={13} className="flex-shrink-0" />
-            <span className="leading-none">Reset</span>
-          </button>
+          <div className="grid grid-cols-3 gap-1.5 mt-2">
+            <button 
+              onClick={onUndoClick}
+              aria-label="Undo last point or box"
+              className="flex flex-col items-center justify-center gap-1 py-1.5 rounded-lg bg-white/[0.01] border border-white/[0.03] hover:bg-white/[0.05] hover:border-white/[0.08] transition-all duration-200 text-[10px] font-semibold text-textSecondary hover:text-textPrimary focus-visible:ring-2 focus-visible:ring-orange-500/50 focus-visible:outline-none cursor-pointer"
+              title="Undo last point/box (Ctrl+Z)"
+            >
+              <Undo size={12} className="flex-shrink-0 text-orange-400/90" />
+              <span className="leading-none mt-0.5">Undo</span>
+            </button>
+            <button 
+              onClick={onRedoClick}
+              aria-label="Redo last undone point or box"
+              className="flex flex-col items-center justify-center gap-1 py-1.5 rounded-lg bg-white/[0.01] border border-white/[0.03] hover:bg-white/[0.05] hover:border-white/[0.08] transition-all duration-200 text-[10px] font-semibold text-textSecondary hover:text-textPrimary focus-visible:ring-2 focus-visible:ring-orange-500/50 focus-visible:outline-none cursor-pointer"
+              title="Redo last undone point/box"
+            >
+              <Redo size={12} className="flex-shrink-0 text-orange-400/90" />
+              <span className="leading-none mt-0.5">Redo</span>
+            </button>
+            <button 
+              onClick={onClearClicks}
+              aria-label="Reset all selected points and boxes"
+              className="flex flex-col items-center justify-center gap-1 py-1.5 rounded-lg bg-white/[0.01] border border-white/[0.03] hover:bg-white/[0.05] hover:border-white/[0.08] transition-all duration-200 text-[10px] font-semibold text-textSecondary hover:text-textPrimary focus-visible:ring-2 focus-visible:ring-orange-500/50 focus-visible:outline-none cursor-pointer"
+              title="Reset selection (Clear all points/boxes)"
+            >
+              <RotateCcw size={12} className="flex-shrink-0 text-orange-400/90" />
+              <span className="leading-none mt-0.5">Reset</span>
+            </button>
+          </div>
         </div>
       </div>
 

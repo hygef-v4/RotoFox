@@ -17,6 +17,7 @@ const VideoCanvas = ({
   onPlayToggle,
   clearSignal,           // increments from parent to trigger clearing all dots
   undoSignal,            // increments from parent to undo last point/box
+  redoSignal,            // increments from parent to redo last point/box
   isUploading = false,
   viewMode = 'overlay',  // overlay, isolated
   onRequestMask,         // called during playback to sync mask with frame
@@ -32,6 +33,8 @@ const VideoCanvas = ({
 
   const [isDragActive, setIsDragActive] = useState(false);
   const fileInputRef = useRef(null);
+
+  const redoHistoryRef = useRef([]);
 
   const [showUndoToast, setShowUndoToast] = useState(false);
   const toastTimeoutRef = useRef(null);
@@ -239,6 +242,7 @@ const VideoCanvas = ({
   useEffect(() => {
     clickPointsRef.current = [];
     boxesRef.current = [];
+    redoHistoryRef.current = [];
     drawCanvas();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clearSignal]);
@@ -257,15 +261,22 @@ const VideoCanvas = ({
     // Priority: undo last box of activeObject, then last click point
     const lastBoxIdx = [...boxesRef.current].map((b, i) => ({ b, i })).reverse().find(({ b }) => b.objId === activeObjectId);
     if (lastBoxIdx !== undefined) {
+      const undoneBox = boxesRef.current[lastBoxIdx.i];
+      redoHistoryRef.current = [...redoHistoryRef.current, { type: 'box', data: undoneBox }];
       boxesRef.current = boxesRef.current.filter((_, i) => i !== lastBoxIdx.i);
     } else {
       // Undo last click point of active object
       const pts = clickPointsRef.current;
+      let undonePt = null;
       for (let i = pts.length - 1; i >= 0; i--) {
         if (pts[i].objId === activeObjectId) {
+          undonePt = pts[i];
           clickPointsRef.current = [...pts.slice(0, i), ...pts.slice(i + 1)];
           break;
         }
+      }
+      if (undonePt) {
+        redoHistoryRef.current = [...redoHistoryRef.current, { type: 'point', data: undonePt }];
       }
     }
 
@@ -276,6 +287,30 @@ const VideoCanvas = ({
     onCanvasClickRef.current?.(filteredPoints, filteredBoxes);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [undoSignal]);
+
+  // ── Redo last undone point/box when redoSignal fires ──────────────────────
+  useEffect(() => {
+    if (!redoSignal) return; // skip initial mount (redoSignal = 0)
+
+    if (redoHistoryRef.current.length === 0) return;
+
+    // Pop the last item from redo history
+    const lastHistoryItem = redoHistoryRef.current[redoHistoryRef.current.length - 1];
+    redoHistoryRef.current = redoHistoryRef.current.slice(0, -1);
+
+    if (lastHistoryItem.type === 'box') {
+      boxesRef.current = [...boxesRef.current, lastHistoryItem.data];
+    } else if (lastHistoryItem.type === 'point') {
+      clickPointsRef.current = [...clickPointsRef.current, lastHistoryItem.data];
+    }
+
+    drawCanvas();
+    // Re-send remaining points to backend so mask is recomputed
+    const filteredPoints = clickPointsRef.current.filter(p => p.objId === activeObjectId);
+    const filteredBoxes  = boxesRef.current.filter(b => b.objId === activeObjectId);
+    onCanvasClickRef.current?.(filteredPoints, filteredBoxes);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [redoSignal]);
 
   // ── Marching ants animation loop (runs always, drives dashOffsetRef) ────────
   useEffect(() => {
@@ -473,6 +508,7 @@ const VideoCanvas = ({
     if (mode === 'add' || mode === 'remove') {
       // Immediately place a visual dot
       clickPointsRef.current = [...clickPointsRef.current, { x, y, mode, objId: activeObjectId }];
+      redoHistoryRef.current = []; // Clear redo history on new action
       drawCanvas();
       // Notify parent (sends to WebSocket)
       const filteredPoints = clickPointsRef.current.filter(p => p.objId === activeObjectId);
@@ -512,6 +548,7 @@ const VideoCanvas = ({
       };
       // Save box visually
       boxesRef.current = [...boxesRef.current, box];
+      redoHistoryRef.current = []; // Clear redo history on new action
       // Notify parent
       const filteredPoints = clickPointsRef.current.filter(p => p.objId === activeObjectId);
       const filteredBoxes = boxesRef.current.filter(b => b.objId === activeObjectId);

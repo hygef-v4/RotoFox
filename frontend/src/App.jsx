@@ -30,6 +30,8 @@ function App() {
   const [clearSignal, setClearSignal] = useState(0);
   // Incrementing this number tells VideoCanvas to undo the last placed point/box
   const [undoSignal, setUndoSignal] = useState(0);
+  // Incrementing this number tells VideoCanvas to redo the last undone point/box
+  const [redoSignal, setRedoSignal] = useState(0);
 
   // Export overlay states
   const [showExportModal, setShowExportModal] = useState(false);
@@ -122,9 +124,15 @@ function App() {
       } else if (e.key === ' ') {
         e.preventDefault();
         setIsPlaying(prev => !prev);
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+      } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault();
+        setRedoSignal(s => s + 1);
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
         e.preventDefault();
         setUndoSignal(s => s + 1);
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')) {
+        e.preventDefault();
+        setRedoSignal(s => s + 1);
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -248,6 +256,8 @@ function App() {
             onExportClick={() => setShowExportModal(true)}
             onSettingsClick={() => setShowSettingsModal(true)}
             onClearClicks={handleClearClicks}
+            onUndoClick={() => setUndoSignal(s => s + 1)}
+            onRedoClick={() => setRedoSignal(s => s + 1)}
             viewMode={viewMode}
             setViewMode={setViewMode}
             objects={objects}
@@ -272,6 +282,7 @@ function App() {
             onPlayToggle={setIsPlaying}
             clearSignal={clearSignal}
             undoSignal={undoSignal}
+            redoSignal={redoSignal}
             isUploading={isUploading}
             viewMode={viewMode}
             onRequestMask={requestMask}
@@ -280,7 +291,6 @@ function App() {
             deleteObjectSignal={deleteObjectSignal}
             onVideoImport={handleVideoImport}
           />
-
         }
         timeline={
           <TimelineController 
