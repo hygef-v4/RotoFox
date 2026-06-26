@@ -13,7 +13,9 @@ const TimelineController = ({
   onPlayToggle,
   onTrackForward,
   onCancelTracking,
-  onSeek
+  onSeek,
+  // ISSUE-04 FIX: canTrack gates the Track button — false if no clicks/mask yet
+  canTrack = false,
 }) => {
   const progress = totalFrames > 0 ? (currentFrame / totalFrames) * 100 : 0;
 
@@ -123,14 +125,14 @@ const TimelineController = ({
           ) : (
             <button 
               onClick={onTrackForward}
-              disabled={!hasVideo}
+              disabled={!hasVideo || !canTrack}
               aria-label="Start tracking propagation"
               className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-bold transition-all duration-200 text-white border focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:outline-none ${
-                hasVideo 
+                hasVideo && canTrack
                   ? "bg-blue-600/80 hover:bg-blue-500 border-blue-500/20 shadow-md shadow-blue-950/10 cursor-pointer active:scale-[0.98]" 
                   : "bg-blue-600/20 text-white/30 border-white/[0.02] cursor-not-allowed"
               }`}
-              title={hasVideo ? "Start tracking mask forward through timeline" : "Please import a video first"}
+              title={!hasVideo ? 'Please import a video first' : !canTrack ? 'Place at least one click point or box first' : 'Start tracking mask forward through timeline'}
             >
               <FastForward size={13} /> Track
             </button>

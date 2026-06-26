@@ -52,6 +52,9 @@ function App() {
   const [deleteObjectSignal, setDeleteObjectSignal] = useState(null);
 
   const [copied, setCopied] = useState(false);
+  // IMPROVE-03: Toast notification when tracking completes
+  const [showTrackingDoneToast, setShowTrackingDoneToast] = useState(false);
+  const trackingDoneTimerRef = useRef(null);
   const handleCopyPath = () => {
     if (exportFilePath) {
       navigator.clipboard.writeText(exportFilePath);
@@ -145,6 +148,17 @@ function App() {
       setCurrentFrame(progressData.currentFrame);
     }
   }, [progressData.currentFrame, isTracking]);
+
+  // IMPROVE-03: Detect tracking completion by watching isTracking go from true -> false
+  const wasTrackingRef = useRef(false);
+  useEffect(() => {
+    if (wasTrackingRef.current && !isTracking && trackedFrames.length > 0) {
+      setShowTrackingDoneToast(true);
+      if (trackingDoneTimerRef.current) clearTimeout(trackingDoneTimerRef.current);
+      trackingDoneTimerRef.current = setTimeout(() => setShowTrackingDoneToast(false), 3500);
+    }
+    wasTrackingRef.current = isTracking;
+  }, [isTracking, trackedFrames.length]);
 
   const handleVideoImport = async (url, file) => {
     setVideoUrl(url);
@@ -246,6 +260,17 @@ function App() {
           Disconnected from AI Core
         </div>
       )}
+
+      {/* IMPROVE-03: Tracking Complete Toast */}
+      {showTrackingDoneToast && (
+        <div className="fixed bottom-[180px] left-1/2 -translate-x-1/2 z-50 flex items-center gap-2.5 bg-[#0f1a0f]/95 border border-green-500/30 backdrop-blur-md px-4 py-2.5 rounded-xl shadow-lg shadow-green-950/40 text-xs font-semibold text-green-400 animate-in fade-in slide-in-from-bottom-3 duration-300">
+          <CheckCircle size={15} className="text-green-400 flex-shrink-0" />
+          <span>Tracking complete — {trackedFrames.length} frames processed</span>
+          <button onClick={() => setShowTrackingDoneToast(false)} className="ml-1 text-green-400/50 hover:text-green-400 transition-colors">
+            <X size={12} />
+          </button>
+        </div>
+      )}
       
       <MainLayout 
         toolbar={
@@ -303,7 +328,9 @@ function App() {
             activeObjectId={activeObjectId}
             trackedFrames={trackedFrames}
             onPlayToggle={() => handlePlayToggle()}
+            // ISSUE-04 FIX: Only allow tracking if there's at least one mask/click on current video
             onTrackForward={() => startTracking(totalFrames, currentFrame + videoOffsetFrame)}
+            canTrack={!!maskImage || trackedFrames.length > 0}
             onCancelTracking={cancelTracking}
             onSeek={handleSeek}
           />

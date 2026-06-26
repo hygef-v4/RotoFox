@@ -191,10 +191,17 @@ export function useAIEngine() {
         type: settings.type,
         bg_color: settings.bg_color,
         total_frames: settings.total_frames,
-        export_path: settings.export_path
+        export_path: settings.export_path || '',
+        // BUG-03 FIX: these were never forwarded to the backend
+        resolution: settings.resolution || 'original',
+        fps: settings.fps || 'original',
       }));
     }
   }, [videoId]);
+
+  // IMPROVE-05 FIX: Debounce requestMask to prevent flooding the backend when the user
+  // scrubs the timeline quickly. Only the last request within 100ms is sent.
+  const requestMaskTimerRef = useRef(null);
 
   const requestMask = useCallback((frameIdx) => {
     // Check local cache first (instant, no network)
@@ -203,13 +210,20 @@ export function useAIEngine() {
       setMaskImage(cached);
       return;
     }
-    // Cache miss - fetch from backend
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        action: 'get_mask',
-        frame_idx: frameIdx
-      }));
-    }
+    // Cache miss: immediately clear the current mask so the previous frame's
+    // overlay doesn't linger on untracked frames during playback.
+    setMaskImage(null);
+    // Then debounce the backend query (for scrubbing; during playback
+    // the cache handles tracked frames, untracked frames just show clean video).
+    if (requestMaskTimerRef.current) clearTimeout(requestMaskTimerRef.current);
+    requestMaskTimerRef.current = setTimeout(() => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          action: 'get_mask',
+          frame_idx: frameIdx
+        }));
+      }
+    }, 100);
   }, []);
 
   const clearMaskCache = useCallback(() => {

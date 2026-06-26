@@ -5,10 +5,10 @@ from app.services.cache_manager import CacheManager
 
 class VideoProcessor:
     @staticmethod
-    def extract_frames(video_path: str, video_id: str, fps_limit: int = None) -> int:
+    def extract_frames(video_path: str, video_id: str, fps_limit: int = None) -> tuple:
         """
         Extract frames from a video and save to the SSD cache directory using OpenCV.
-        Returns the number of frames extracted.
+        Returns (frame_count, source_fps) tuple.
         """
         video_dir = CacheManager.get_video_dir(video_id)
         
@@ -17,6 +17,8 @@ class VideoProcessor:
             raise RuntimeError(f"Failed to open video: {video_path}")
         
         source_fps = cap.get(cv2.CAP_PROP_FPS)
+        if source_fps <= 0:
+            source_fps = 25.0  # Fallback if FPS metadata is missing
         total_source_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
         # Calculate frame skip interval if fps_limit is set
@@ -46,5 +48,5 @@ class VideoProcessor:
             source_frame_idx += 1
         
         cap.release()
-        print(f"VideoProcessor: Extracted {frame_count} frames to {video_dir}")
-        return frame_count
+        print(f"VideoProcessor: Extracted {frame_count} frames to {video_dir} (source FPS: {source_fps})")
+        return frame_count, source_fps

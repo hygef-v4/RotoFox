@@ -15,6 +15,11 @@ def read_root():
 @router.post("/upload")
 async def upload_video(file: UploadFile = File(...)):
     video_id = f"video_{int(time.time())}"
+    
+    # ISSUE-09 FIX: Clear all previous cache before creating a new session.
+    # Without this, each upload creates a new timestamped folder that never gets deleted.
+    await run_in_threadpool(CacheManager.clear_all_cache)
+    
     video_dir = CacheManager.get_video_dir(video_id)
     video_path = video_dir / file.filename
     
@@ -25,12 +30,12 @@ async def upload_video(file: UploadFile = File(...)):
         
     # Extract frames using OpenCV (runs in threadpool to avoid blocking event loop)
     try:
-        frames_count = await run_in_threadpool(VideoProcessor.extract_frames, str(video_path), video_id)
+        frames_count, source_fps = await run_in_threadpool(VideoProcessor.extract_frames, str(video_path), video_id)
         
         # Load the extracted video frames into AIEngine (runs in threadpool)
         # This will fail gracefully if SAM2 is not available
         try:
-            await run_in_threadpool(ai_engine.load_video, video_id)
+            await run_in_threadpool(ai_engine.load_video, video_id, source_fps)
         except Exception as e:
             print(f"Warning: Could not load video into SAM 2: {e}")
             
@@ -38,6 +43,7 @@ async def upload_video(file: UploadFile = File(...)):
             "status": "success", 
             "video_id": video_id, 
             "frames_count": frames_count,
+            "fps": source_fps,
             "message": "Video uploaded and frames extracted successfully."
         }
     except Exception as e:

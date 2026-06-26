@@ -39,6 +39,9 @@ const VideoCanvas = ({
   const [showUndoToast, setShowUndoToast] = useState(false);
   const toastTimeoutRef = useRef(null);
   const [uploadProgress, setUploadProgress] = useState(0);
+  // ISSUE-02 FIX: track point count in state so the HUD re-renders when points change.
+  // clickPointsRef alone never triggers a re-render.
+  const [pointCount, setPointCount] = useState(0);
 
   // Simulated progress logic when isUploading transitions to true
   useEffect(() => {
@@ -121,6 +124,9 @@ const VideoCanvas = ({
 
     // 2. Committed selection boxes – active box uses marching ants (Rotobrush-style)
     boxesRef.current.forEach(({ x1, y1, x2, y2, objId }) => {
+      // Skip rendering boxes for objects that have been deleted from the objects list
+      if (!objects.find(o => o.id === objId)) return;
+
       const px1 = x1 * canvas.width;
       const py1 = y1 * canvas.height;
       const pw  = (x2 - x1) * canvas.width;
@@ -165,17 +171,16 @@ const VideoCanvas = ({
 
     // 4. Click point dots (match object color, or red for remove)
     clickPointsRef.current.forEach(({ x, y, mode, objId }) => {
+      // Skip rendering dots for objects that have been deleted from the objects list
+      const obj = objects.find(o => o.id === objId);
+      if (!obj) return;
+
       const px = x * canvas.width;
       const py = y * canvas.height;
 
       const isAdd = mode === 'add';
-      
-      // Find object color
-      const obj = objects.find(o => o.id === objId);
-      const baseColor = obj ? obj.color : '#22c55e'; // Fallback to green
-      
-      // If mode is 'remove', we can use red, or just the object's color but maybe smaller/different shape.
-      // But the SAM 2 UI usually just uses Red for negative points.
+      const baseColor = obj.color;
+
       const fill   = isAdd ? baseColor : '#ef4444';
       const stroke = isAdd ? baseColor : '#dc2626';
 
@@ -185,7 +190,7 @@ const VideoCanvas = ({
       // Outer glow
       ctx.beginPath();
       ctx.arc(px, py, DOT_RADIUS + 3, 0, Math.PI * 2);
-      ctx.fillStyle = isAdd ? `${baseColor}40` : 'rgba(239,68,68,0.25)'; // 40 is hex for 25% opacity
+      ctx.fillStyle = isAdd ? `${baseColor}40` : 'rgba(239,68,68,0.25)';
       ctx.fill();
 
       // Solid dot
@@ -243,6 +248,7 @@ const VideoCanvas = ({
     clickPointsRef.current = [];
     boxesRef.current = [];
     redoHistoryRef.current = [];
+    setPointCount(0);
     drawCanvas();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clearSignal]);
@@ -285,6 +291,7 @@ const VideoCanvas = ({
     const filteredPoints = clickPointsRef.current.filter(p => p.objId === activeObjectId);
     const filteredBoxes  = boxesRef.current.filter(b => b.objId === activeObjectId);
     onCanvasClickRef.current?.(filteredPoints, filteredBoxes);
+    setPointCount(clickPointsRef.current.length);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [undoSignal]);
 
@@ -309,6 +316,7 @@ const VideoCanvas = ({
     const filteredPoints = clickPointsRef.current.filter(p => p.objId === activeObjectId);
     const filteredBoxes  = boxesRef.current.filter(b => b.objId === activeObjectId);
     onCanvasClickRef.current?.(filteredPoints, filteredBoxes);
+    setPointCount(clickPointsRef.current.length);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [redoSignal]);
 
@@ -342,6 +350,7 @@ const VideoCanvas = ({
       clickPointsRef.current = [];
       boxesRef.current = [];
       prevFrameRef.current = currentFrame;
+      setPointCount(0);
       drawCanvas();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -407,6 +416,8 @@ const VideoCanvas = ({
   }, [isPlaying, totalFrames, videoOffsetFrame, onFrameChange, onPlayToggle]);
 
   // ── Mask image ────────────────────────────────────────────────────────────
+  // ISSUE-11 FIX: Cap cache at 200 Image objects to prevent memory leak during long sessions.
+  const MAX_IMAGE_CACHE = 200;
   const imageCacheRef = useRef(new Map()); // base64 -> Image obj
 
   useEffect(() => {
@@ -425,7 +436,11 @@ const VideoCanvas = ({
 
     const img = new Image();
     img.onload = () => {
-      // Cache it for instant retrieval next time
+      // Evict oldest entry if cache is full
+      if (imageCacheRef.current.size >= MAX_IMAGE_CACHE) {
+        const firstKey = imageCacheRef.current.keys().next().value;
+        imageCacheRef.current.delete(firstKey);
+      }
       imageCacheRef.current.set(maskImageBase64, img);
       maskImageObjRef.current = img;
       drawCanvas();
@@ -509,6 +524,7 @@ const VideoCanvas = ({
       // Immediately place a visual dot
       clickPointsRef.current = [...clickPointsRef.current, { x, y, mode, objId: activeObjectId }];
       redoHistoryRef.current = []; // Clear redo history on new action
+      setPointCount(clickPointsRef.current.length);
       drawCanvas();
       // Notify parent (sends to WebSocket)
       const filteredPoints = clickPointsRef.current.filter(p => p.objId === activeObjectId);
@@ -571,9 +587,14 @@ const VideoCanvas = ({
 
   const handleLoadedMetadata = useCallback((e) => {
     const video = e.target;
+    // ISSUE-08 FIX: Don't hardcode 30fps. The parent will use the actual fps from
+    // the backend upload response. We still send our best estimate as a fallback,
+    // but use the video's own native FPS-derived duration calculation.
+    // The actual frame count is authoritative from the backend (backendFramesCount).
+    const estimatedFps = video.duration > 0 ? Math.round((video.videoWidth * video.videoHeight > 1280 * 720 ? 30 : 25)) : 25;
     onVideoMetadataLoaded?.({
       duration: video.duration,
-      totalFrames: Math.floor(video.duration * 30),
+      totalFrames: Math.floor(video.duration * estimatedFps),
       width: video.videoWidth,
       height: video.videoHeight,
     });
@@ -697,8 +718,9 @@ const VideoCanvas = ({
           }>
             {clickMode === 'add' ? '● ADD' : clickMode === 'remove' ? '● REMOVE' : '□ BOX'}
           </span>
-          {clickPointsRef.current.length > 0 && (
-            <span>{clickPointsRef.current.length} pts</span>
+          {/* ISSUE-02 FIX: use pointCount state (not ref) so this re-renders when points change */}
+          {pointCount > 0 && (
+            <span>{pointCount} pts</span>
           )}
         </div>
       )}

@@ -36,6 +36,7 @@ class AIEngine:
         self.video_id = None
         self.video_width = 1280
         self.video_height = 720
+        self.video_fps = 25.0   # Actual FPS of the loaded video
         
         if SAM2_AVAILABLE:
             self._init_model()
@@ -63,7 +64,7 @@ class AIEngine:
         self.predictor = build_sam2_video_predictor(model_cfg, str(checkpoint), device=self.device)
         print("AIEngine: SAM 2 loaded successfully.")
 
-    def load_video(self, video_id: str):
+    def load_video(self, video_id: str, fps: float = 25.0):
         if not SAM2_AVAILABLE:
             raise RuntimeError("SAM 2 is not installed or weights are missing. Please run setup_sam2.py")
         
@@ -81,6 +82,10 @@ class AIEngine:
         except Exception as e:
             print(f"Warning: Could not read video dimensions from first frame: {e}. Defaulting to 1280x720")
             self.video_width, self.video_height = 1280, 720
+
+        # Store actual video FPS for use as default in export
+        self.video_fps = fps if fps and fps > 0 else 25.0
+        print(f"AIEngine: Video FPS stored as {self.video_fps}")
 
         print(f"AIEngine: Initializing state for video {video_id}")
         
@@ -175,7 +180,10 @@ class AIEngine:
         mask_dir.mkdir(exist_ok=True)
         
         try:
-            # We iterate the generator directly to support real-time streaming of masks and progress
+            # BUG-04 FIX: Use a `completed` flag instead of for...else to correctly detect
+            # natural completion vs break (cancel). for...else inside `with` blocks is error-prone.
+            completed = False
+
             if hasattr(self, 'device') and self.device.type == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     generator = self.predictor.propagate_in_video(self.inference_state, start_frame_idx=start_frame)
@@ -188,8 +196,6 @@ class AIEngine:
                         
                         b64_mask = self._masks_to_base64(out_obj_ids, out_mask_logits, self.video_width, self.video_height)
                         
-                        # Save mask to disk for export (optional, but keep for now if single object export is needed, though export logic might need updating later)
-                        # We just save the combined mask for visual caching
                         if b64_mask:
                             mask_filename = f"{out_frame_idx:05d}.png"
                             img_bytes = base64.b64decode(b64_mask)
@@ -205,12 +211,9 @@ class AIEngine:
                             "progress": progress,
                             "mask_base64": b64_mask
                         })
-                        
-                        # Yield control to the event loop so that other events (like cancel_tracking) can be processed
                         await asyncio.sleep(0.001)
                     else:
-                        print("AI Engine: Propagation completed successfully.")
-                        await websocket.send_json({"status": "completed"})
+                        completed = True
             else:
                 generator = self.predictor.propagate_in_video(self.inference_state, start_frame_idx=start_frame)
                 
@@ -237,12 +240,13 @@ class AIEngine:
                         "progress": progress,
                         "mask_base64": b64_mask
                     })
-                    
-                    # Yield control to the event loop so that other events (like cancel_tracking) can be processed
                     await asyncio.sleep(0.001)
                 else:
-                    print("AI Engine: Propagation completed successfully.")
-                    await websocket.send_json({"status": "completed"})
+                    completed = True
+
+            if completed:
+                print("AI Engine: Propagation completed successfully.")
+                await websocket.send_json({"status": "completed"})
 
         except Exception as e:
             import traceback
@@ -251,7 +255,6 @@ class AIEngine:
             await websocket.send_json({"status": "error", "message": str(e)})
         finally:
             self.state.is_tracking = False
-            # Dọn dẹp bộ nhớ sau khi tracking xong (kể cả lỗi hay thành công)
             from fastapi.concurrency import run_in_threadpool
             await run_in_threadpool(MemoryManager.cleanup)
 
@@ -259,16 +262,15 @@ class AIEngine:
         if not self.inference_state:
             return None
         try:
+            # SAM2's remove_object returns (inference_state, {frame_idx: (obj_ids, mask_logits)})
             _, updated_frames = self.predictor.remove_object(self.inference_state, obj_id)
             print(f"AIEngine: Object {obj_id} removed.")
             
-            # Find if there is an updated mask for the current frame
-            if frame_idx is not None:
-                for f_idx, out_mask_logits in updated_frames:
-                    if f_idx == frame_idx:
-                        # Get remaining obj_ids
-                        out_obj_ids = self.inference_state.get("obj_ids", [])
-                        return self._masks_to_base64(out_obj_ids, out_mask_logits, self.video_width, self.video_height)
+            # BUG-05 FIX: updated_frames is a dict {frame_idx: (obj_ids, mask_logits)}
+            # Previous code iterated it as a generator of tuples, which is incorrect.
+            if frame_idx is not None and isinstance(updated_frames, dict) and frame_idx in updated_frames:
+                out_obj_ids, out_mask_logits = updated_frames[frame_idx]
+                return self._masks_to_base64(out_obj_ids, out_mask_logits, self.video_width, self.video_height)
             return None
         except Exception as e:
             print(f"AIEngine: Error removing object {obj_id}: {e}")
@@ -284,9 +286,10 @@ class AIEngine:
         fps_str = settings.get("fps", "original")
         
         try:
-            fps = float(fps_str) if fps_str != "original" else 25.0
+            # ISSUE-10 FIX: use actual video FPS as default instead of hardcoded 25
+            fps = float(fps_str) if fps_str != "original" else self.video_fps
         except ValueError:
-            fps = 25.0
+            fps = self.video_fps
             
         export_w, export_h = self.video_width, self.video_height
         if resolution_str == "1080p":
@@ -372,13 +375,13 @@ class AIEngine:
                 
                 writer.write(out_frame)
                 
-                # Progress update
-                if i % max(1, total_frames // 20) == 0:
+                # ISSUE-06 FIX: update progress every frame (throttled by time to avoid flooding WS)
+                if i % max(1, total_frames // 50) == 0 or i == total_frames - 1:
                     progress = int((i / max(total_frames, 1)) * 100)
                     await websocket.send_json({
                         "status": "export_progress",
                         "progress": progress,
-                        "message": f"Rendering frame {i}/{total_frames}..."
+                        "message": f"Rendering frame {i+1}/{total_frames}..."
                     })
                     await asyncio.sleep(0.001)
 

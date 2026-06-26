@@ -2,6 +2,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import asyncio
 from fastapi.concurrency import run_in_threadpool
 from app.services.ai_engine import AIEngine
+from app.services.cache_manager import CacheManager
 
 router = APIRouter()
 ai_engine = AIEngine()
@@ -78,23 +79,27 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif action == "clear_clicks":
                 try:
-                    if hasattr(ai_engine, "inference_state") and getattr(ai_engine, "frames_dir", None):
-                        # Reset SAM 2 state to clear all points (prevents CUDA OOM)
-                        ai_engine.predictor.reset_state(ai_engine.inference_state)
+                    # BUG-01 FIX: was checking `frames_dir` which doesn't exist on AIEngine.
+                    # Now checks inference_state directly.
+                    if ai_engine.inference_state is not None and ai_engine.predictor is not None:
+                        # Reset SAM 2 state to clear all points and memory
+                        await run_in_threadpool(ai_engine.predictor.reset_state, ai_engine.inference_state)
                         
                         # Clear old masks from disk so UI doesn't load stale data when scrubbing
-                        mask_dir = CacheManager.get_video_dir(ai_engine.video_id) / "masks"
-                        if mask_dir.exists():
-                            import shutil
-                            shutil.rmtree(mask_dir)
-                            mask_dir.mkdir(parents=True, exist_ok=True)
+                        if ai_engine.video_id:
+                            mask_dir = CacheManager.get_video_dir(ai_engine.video_id) / "masks"
+                            if mask_dir.exists():
+                                import shutil
+                                shutil.rmtree(mask_dir)
+                                mask_dir.mkdir(parents=True, exist_ok=True)
+                            print(f"WebSocket: SAM2 state reset and masks cleared for video {ai_engine.video_id}.")
                             
-                        # We also send an empty mask back so the frontend clears visually if it didn't already
-                        await websocket.send_json({
-                            "status": "mask_update",
-                            "frame": data.get("frame_idx", 0),
-                            "mask_base64": None
-                        })
+                    # Always send an empty mask back so the frontend clears visually
+                    await websocket.send_json({
+                        "status": "mask_update",
+                        "frame": data.get("frame_idx", 0),
+                        "mask_base64": None
+                    })
                 except Exception as e:
                     print(f"Error clearing clicks: {e}")
                 
@@ -119,33 +124,28 @@ async def websocket_endpoint(websocket: WebSocket):
             elif action == "get_mask":
                 frame_idx = data.get("frame_idx", 0)
                 try:
-                    from app.services.cache_manager import CacheManager
-                    import cv2
-                    import numpy as np
-                    from PIL import Image
-                    import io
                     import base64
                     
+                    if not ai_engine.video_id:
+                        await websocket.send_json({"status": "mask_update", "frame": frame_idx, "mask_base64": None})
+                        continue
+
                     mask_dir = CacheManager.get_video_dir(ai_engine.video_id) / "masks"
                     mask_path = mask_dir / f"{frame_idx:05d}.png"
                     
                     if mask_path.exists():
-                        # Read the grayscale mask from disk
-                        m = await run_in_threadpool(cv2.imread, str(mask_path), cv2.IMREAD_GRAYSCALE)
-                        if m is not None:
-                            # Convert to transparent white mask exactly like _mask_to_base64 does
-                            rgba = np.zeros((m.shape[0], m.shape[1], 4), dtype=np.uint8)
-                            rgba[m > 127, :] = [255, 255, 255, 255]
-                            img = Image.fromarray(rgba, 'RGBA')
-                            buf = io.BytesIO()
-                            img.save(buf, format='PNG')
-                            b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-                            
-                            await websocket.send_json({
-                                "status": "mask_update",
-                                "frame": frame_idx,
-                                "mask_base64": b64
-                            })
+                        # BUG-02 FIX: Read RGBA PNG as-is and re-encode to base64.
+                        # Previous code converted to grayscale and lost multi-object color data.
+                        def read_and_encode(path):
+                            with open(path, "rb") as f:
+                                return base64.b64encode(f.read()).decode("utf-8")
+
+                        b64 = await run_in_threadpool(read_and_encode, str(mask_path))
+                        await websocket.send_json({
+                            "status": "mask_update",
+                            "frame": frame_idx,
+                            "mask_base64": b64
+                        })
                     else:
                         await websocket.send_json({
                             "status": "mask_update",
