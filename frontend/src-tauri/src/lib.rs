@@ -14,7 +14,7 @@ pub fn run() {
         .setup(|app| {
             // Spawn the python backend sidecar
             // The sidecar is managed by Tauri and will be terminated when the app exits.
-            match app.shell().sidecar("rotofox-backend") {
+            match app.shell().sidecar("binaries/rotofox-backend") {
                 Ok(sidecar) => {
                     match sidecar.spawn() {
                         Ok((_rx, _child)) => {
