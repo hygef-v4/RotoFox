@@ -178,12 +178,54 @@ class AIEngine:
         img.save(buf, format='PNG')
         return base64.b64encode(buf.getvalue()).decode('utf-8')
 
+    def _clear_stale_non_cond_memory(self, start_frame: int):
+        """Clear SAM2 non-conditioning frame outputs for all frames >= start_frame.
+
+        During propagation SAM2 caches per-frame predictions in
+        ``non_cond_frame_outputs``.  On a *second* propagation run the model
+        re-uses these cached features as memory context when predicting frames
+        that come after the new annotation frame.  This causes the output to
+        look like the *first* run even when the user has placed new/different
+        clicks — the stale memory dominates the new conditioning signal.
+
+        Deleting the cached entries for frames >= start_frame forces SAM2 to
+        recompute them from scratch using the fresh annotation as context.
+        The *conditioning* outputs (user clicks / boxes) are intentionally
+        left untouched so that all annotations remain valid.
+        """
+        if not self.inference_state:
+            return
+        output_dict_per_obj = self.inference_state.get("output_dict_per_obj", {})
+        cleared = 0
+        for obj_idx in output_dict_per_obj:
+            non_cond = output_dict_per_obj[obj_idx]["non_cond_frame_outputs"]
+            stale = [f for f in list(non_cond.keys()) if f >= start_frame]
+            for f in stale:
+                del non_cond[f]
+                cleared += 1
+        if cleared:
+            print(f"AIEngine: Cleared {cleared} stale non-cond memory entries "
+                  f"for frames >= {start_frame}")
+        else:
+            print(f"AIEngine: No stale non-cond memory to clear for frames >= {start_frame}")
+
+
     async def run_propagation(self, websocket, start_frame=None):
         if not self.state.is_tracking or not self.inference_state:
             print("AI Engine: Cannot start propagation - not tracking or no inference state")
             return
 
-        print(f"AI Engine: Starting propagation for {self.state.total_frames} frames...")
+        # Clear stale SAM2 memory BEFORE propagating so that any annotation
+        # changes the user made at (or after) start_frame are reflected in the
+        # output.  Without this, SAM2 reuses its cached non-conditioning
+        # features from the previous propagation run as memory context for
+        # frames after start_frame, causing the old mask to dominate even when
+        # the user has placed new clicks.
+        if start_frame is not None and start_frame > 0:
+            self._clear_stale_non_cond_memory(start_frame)
+
+        print(f"AI Engine: Starting propagation from frame {start_frame} "
+              f"for {self.state.total_frames} total frames...")
         video_dir = CacheManager.get_video_dir(self.video_id)
         mask_dir = video_dir / "masks"
         mask_dir.mkdir(exist_ok=True)
