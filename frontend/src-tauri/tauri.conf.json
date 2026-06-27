@@ -24,7 +24,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBinaries": [
+    "externalBin": [
       "binaries/rotofox-backend"
     ],
     "icon": [
