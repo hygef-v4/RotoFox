@@ -7,7 +7,7 @@
     "core:default",
     "opener:default",
     {
-      "identifier": "shell:allow-execute",
+      "identifier": "shell:allow-spawn",
       "allow": [
         {
           "name": "binaries/rotofox-backend",
