@@ -20,8 +20,11 @@ app.include_router(websockets.router)
 if __name__ == "__main__":
     import sys
     is_frozen = getattr(sys, 'frozen', False)
+    # Bypass string import in packaged executable
+    app_target = app if is_frozen else "main:app"
+    
     uvicorn.run(
-        "main:app", 
+        app_target, 
         host="127.0.0.1", 
         port=8000, 
         reload=not is_frozen,
