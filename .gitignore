@@ -37,3 +37,8 @@ Thumbs.db
 
 # Graphify
 graphify-out/
+
+# PyInstaller
+backend/build/
+backend/dist/
+*.spec
