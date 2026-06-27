@@ -32,13 +32,23 @@ async def websocket_endpoint(websocket: WebSocket):
                 video_id = data.get("video_id")
                 total_frames = data.get("total_frames", 50)
                 start_frame = data.get("start_frame", None)
+                print(f"[track_forward] start_frame={start_frame}, "
+                      f"interaction_frames={sorted(ai_engine.interaction_frames)}")
+                
+                # Always respect the frontend's start_frame.
+                # SAM2 retains its memory bank from previous propagation runs, so:
+                #   - Forward track: propagate_in_video(start_frame_idx=200) works because
+                #     SAM2 already has memory for frames 0-199.
+                #   - Correction: user changes annotation at frame 50, clicks Track from 50.
+                #     propagate_in_video(start_frame_idx=50) re-predicts 50+ using
+                #     memory[0-49] + updated annotation[50] — correct result, no restart needed.
                 
                 # Use ai_engine's own state so propagation sees is_tracking=True
                 ai_engine.state.start_tracking(video_id, total_frames)
                 
-                # Propagation is a long-running generator with awaits inside, so we don't run_in_threadpool it completely.
-                # However, it contains its own asyncio.sleep to yield control.
+                # Propagation is a long-running generator with awaits inside.
                 asyncio.create_task(ai_engine.run_propagation(websocket, start_frame))
+
                 
             elif action == "cancel_tracking":
                 ai_engine.state.request_cancel()
@@ -93,7 +103,10 @@ async def websocket_endpoint(websocket: WebSocket):
                                 shutil.rmtree(mask_dir)
                                 mask_dir.mkdir(parents=True, exist_ok=True)
                             print(f"WebSocket: SAM2 state reset and masks cleared for video {ai_engine.video_id}.")
-                            
+                        
+                        # Also clear interaction history so correction logic starts fresh
+                        ai_engine.interaction_frames.clear()
+                        
                     # Always send an empty mask back so the frontend clears visually
                     await websocket.send_json({
                         "status": "mask_update",

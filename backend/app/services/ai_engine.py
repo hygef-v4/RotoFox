@@ -37,6 +37,9 @@ class AIEngine:
         self.video_width = 1280
         self.video_height = 720
         self.video_fps = 25.0   # Actual FPS of the loaded video
+        # Track which frames the user has interacted with.
+        # Used to determine the correct propagation start frame for corrections.
+        self.interaction_frames: set = set()
         
         if SAM2_AVAILABLE:
             self._init_model()
@@ -87,6 +90,9 @@ class AIEngine:
         self.video_fps = fps if fps and fps > 0 else 25.0
         print(f"AIEngine: Video FPS stored as {self.video_fps}")
 
+        # Reset interaction history on new video
+        self.interaction_frames = set()
+
         print(f"AIEngine: Initializing state for video {video_id}")
         
         # Free up previous state memory before loading new one
@@ -110,6 +116,9 @@ class AIEngine:
         print(f"AIEngine: add_point_or_box. Frame: {frame_idx}, Obj: {obj_id}, Points: {len(points) if points else 0}, Box: {'Yes' if box else 'No'}, Scale: {width}x{height}")
         if not self.inference_state:
             raise RuntimeError("No video loaded into AI engine.")
+
+        # Record this interaction so track_forward can decide the correct start frame
+        self.interaction_frames.add(frame_idx)
 
         abs_points, abs_labels, abs_box = None, None, None
 
