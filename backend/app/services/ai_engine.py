@@ -11,6 +11,7 @@ from pathlib import Path
 from app.core.engine_state import EngineState
 from app.services.memory_manager import MemoryManager
 from app.services.cache_manager import CacheManager
+from app.services.model_manager import ModelManager, MODELS
 
 try:
     from sam2.build_sam import build_sam2_video_predictor
@@ -40,6 +41,7 @@ class AIEngine:
         # Track which frames the user has interacted with.
         # Used to determine the correct propagation start frame for corrections.
         self.interaction_frames: set = set()
+        self.active_model_id = None
         
         if SAM2_AVAILABLE:
             self._init_model()
@@ -54,22 +56,72 @@ class AIEngine:
         else:
             self.device = torch.device("cpu")
 
-        print(f"AIEngine: Loading SAM 2 on {self.device}...")
+        # Find first available model checkpoint in the directory
+        checkpoints_dir = ModelManager.get_checkpoints_dir()
+        found_model = None
         
-        checkpoint = Path(__file__).parent.parent.parent / "checkpoints" / "sam2.1_hiera_large.pt"
-        if not checkpoint.exists():
-            print("WARNING: SAM 2 weights not found. Run setup_sam2.py!")
-            global SAM2_AVAILABLE
-            SAM2_AVAILABLE = False
+        # Priority order of checkpoints to load automatically
+        for model_id in ["large", "base", "small", "tiny"]:
+            info = MODELS[model_id]
+            if (checkpoints_dir / info["checkpoint"]).exists():
+                found_model = model_id
+                break
+                
+        if not found_model:
+            print("AIEngine: WARNING: No SAM 2 checkpoints found in checkpoints/ directory. Waiting for user to download in Model Hub.")
+            self.predictor = None
+            self.active_model_id = None
             return
+
+        print(f"AIEngine: Loading {MODELS[found_model]['name']} on {self.device}...")
+        try:
+            checkpoint = checkpoints_dir / MODELS[found_model]["checkpoint"]
+            model_cfg = MODELS[found_model]["config"]
+            self.predictor = build_sam2_video_predictor(model_cfg, str(checkpoint), device=self.device)
+            self.active_model_id = found_model
+            print(f"AIEngine: {MODELS[found_model]['name']} loaded successfully.")
+        except Exception as e:
+            print(f"AIEngine: Error loading initial model {found_model}: {e}")
+            self.predictor = None
+            self.active_model_id = None
+
+    def load_model(self, model_id: str):
+        """Unloads the current model and loads a new model checkpoint dynamically."""
+        global SAM2_AVAILABLE
+        if not SAM2_AVAILABLE:
+            raise RuntimeError("SAM 2 framework is not installed.")
             
-        model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
-        self.predictor = build_sam2_video_predictor(model_cfg, str(checkpoint), device=self.device)
-        print("AIEngine: SAM 2 loaded successfully.")
+        if model_id not in MODELS:
+            raise ValueError(f"Unknown model id: {model_id}")
+            
+        if model_id == "matanyone":
+            raise ValueError("MatAnyone 2 is a refinement model and cannot be loaded as a tracking model. It will be used automatically during project export.")
+            
+        checkpoints_dir = ModelManager.get_checkpoints_dir()
+        info = MODELS[model_id]
+        checkpoint_path = checkpoints_dir / info["checkpoint"]
+        
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint file {info['checkpoint']} does not exist. Please download it first.")
+            
+        print(f"AIEngine: Unloading model and clearing RAM/VRAM cache...")
+        self.predictor = None
+        if self.inference_state is not None:
+            del self.inference_state
+            self.inference_state = None
+        MemoryManager.cleanup()
+        
+        print(f"AIEngine: Loading {info['name']} dynamically...")
+        self.predictor = build_sam2_video_predictor(info["config"], str(checkpoint_path), device=self.device)
+        self.active_model_id = model_id
+        
+        # Ensure SAM2_AVAILABLE global flag is true
+        SAM2_AVAILABLE = True
+        print(f"AIEngine: Dynamic load of {info['name']} complete.")
 
     def load_video(self, video_id: str, fps: float = 25.0):
-        if not SAM2_AVAILABLE:
-            raise RuntimeError("SAM 2 is not installed or weights are missing. Please run setup_sam2.py")
+        if not SAM2_AVAILABLE or self.predictor is None:
+            raise RuntimeError("SAM 2 model is not loaded. Please download/activate a model in the Model Hub.")
         
         video_dir = CacheManager.get_video_dir(video_id)
         frames = list(video_dir.glob("*.jpg"))
@@ -326,7 +378,6 @@ class AIEngine:
         except Exception as e:
             print(f"AIEngine: Error removing object {obj_id}: {e}")
             return None
-
     async def run_export(self, websocket, settings: dict):
         export_format = settings.get("format", "mp4")
         export_type = settings.get("type", "alpha")
@@ -375,7 +426,75 @@ class AIEngine:
         video_dir = CacheManager.get_video_dir(self.video_id)
         mask_dir = video_dir / "masks"
         
-        print(f"AI Engine: Exporting project to {output_path} (Type: {export_type}, BG: {bg_color_str}, Res: {export_w}x{export_h}, FPS: {fps})...")
+        # Check if matanyone2 checkpoint exists to trigger edge refinement
+        checkpoints_dir = ModelManager.get_checkpoints_dir()
+        matanyone_checkpoint = checkpoints_dir / "matanyone2.pth"
+        use_matanyone = matanyone_checkpoint.exists()
+        
+        refined_mask_dir = None
+        
+        if use_matanyone:
+            try:
+                await websocket.send_json({
+                    "status": "export_progress",
+                    "progress": 0,
+                    "message": "Starting MatAnyone 2 edge refinement on GPU..."
+                })
+                
+                # Create temporary isolated input directory for MatAnyone2 to prevent folder listing crash
+                temp_input_dir = video_dir / "matanyone_input"
+                temp_input_dir.mkdir(exist_ok=True)
+                for f in video_dir.glob("*.jpg"):
+                    import shutil
+                    shutil.copy2(f, temp_input_dir / f.name)
+                    
+                temp_output_dir = video_dir / "matanyone_output"
+                temp_output_dir.mkdir(exist_ok=True)
+                
+                # Import and run MatAnyone 2 dynamically
+                import sys
+                repo_root = Path(__file__).parent.parent.parent.parent
+                matanyone_src_dir = repo_root / "backend" / "third_party" / "MatAnyone2"
+                if str(matanyone_src_dir) not in sys.path:
+                    sys.path.insert(0, str(matanyone_src_dir))
+                    
+                from inference_matanyone2 import main as matanyone2_inference
+                
+                # The first mask generated by SAM2
+                masks_list = sorted(list(mask_dir.glob("*.png")))
+                if not masks_list:
+                    raise FileNotFoundError("No SAM 2 masks found for refinement.")
+                first_mask_path = masks_list[0]
+                
+                # Unload SAM 2 model to free VRAM for MatAnyone 2 (Lazy Loading architecture rule)
+                self.predictor = None
+                if self.inference_state is not None:
+                    del self.inference_state
+                    self.inference_state = None
+                MemoryManager.cleanup()
+                
+                # Run inference in threadpool so websocket pings don't block
+                await run_in_threadpool(
+                    matanyone2_inference,
+                    input_path=str(temp_input_dir),
+                    mask_path=str(first_mask_path),
+                    output_path=str(temp_output_dir),
+                    ckpt_path=str(matanyone_checkpoint),
+                    save_image=True,
+                    max_size=512
+                )
+                
+                # MatAnyone 2 outputs refined masks to temp_output_dir / "matanyone_input" / "pha" / 0000.png
+                refined_mask_dir = temp_output_dir / "matanyone_input" / "pha"
+                print(f"AIEngine: MatAnyone 2 refinement completed. Using masks from: {refined_mask_dir}")
+                
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print(f"AIEngine: WARNING: MatAnyone 2 refinement failed: {e}. Falling back to SAM 2 raw masks.")
+                use_matanyone = False
+        
+        print(f"AI Engine: Exporting project to {output_path} (Type: {export_type}, BG: {bg_color_str}, Res: {export_w}x{export_h}, FPS: {fps}, Refined: {use_matanyone})...")
         
         try:
             if export_format == "webm":
@@ -387,7 +506,12 @@ class AIEngine:
             
             for i in range(total_frames):
                 frame_path = video_dir / f"{i:05d}.jpg"
-                mask_path = mask_dir / f"{i:05d}.png"
+                
+                # Read mask from refined directory if active, otherwise fall back to SAM 2 masks
+                if use_matanyone and refined_mask_dir is not None:
+                    current_mask_path = refined_mask_dir / f"{i:04d}.png"
+                else:
+                    current_mask_path = mask_dir / f"{i:05d}.png"
                 
                 # Default frame is black if missing
                 out_frame = np.zeros((self.video_height, self.video_width, 3), dtype=np.uint8)
@@ -396,11 +520,11 @@ class AIEngine:
                     img = cv2.imread(str(frame_path))
                     if img is not None:
                         out_frame = img
-
+ 
                 # Read mask using alpha channel since it's an RGBA image
                 mask = np.zeros((self.video_height, self.video_width), dtype=np.uint8)
-                if mask_path.exists():
-                    m = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
+                if current_mask_path.exists():
+                    m = cv2.imread(str(current_mask_path), cv2.IMREAD_UNCHANGED)
                     if m is not None and len(m.shape) == 3 and m.shape[2] == 4:
                         mask = m[:, :, 3] # Extract alpha channel
                     elif m is not None:
@@ -410,7 +534,7 @@ class AIEngine:
                 if export_w != self.video_width or export_h != self.video_height:
                     out_frame = cv2.resize(out_frame, (export_w, export_h), interpolation=cv2.INTER_LINEAR)
                     mask = cv2.resize(mask, (export_w, export_h), interpolation=cv2.INTER_NEAREST)
-
+ 
                 # Render logic
                 if export_type == "alpha":
                     # Grayscale mask to BGR (black and white video)
@@ -435,7 +559,7 @@ class AIEngine:
                         "message": f"Rendering frame {i+1}/{total_frames}..."
                     })
                     await asyncio.sleep(0.001)
-
+ 
             writer.release()
             
             await websocket.send_json({
@@ -448,3 +572,16 @@ class AIEngine:
             traceback.print_exc()
             print(f"AI Engine Export Error: {e}")
             await websocket.send_json({"status": "export_error", "message": str(e)})
+        finally:
+            # Clean up MatAnyone temporary folders
+            if use_matanyone:
+                try:
+                    import shutil
+                    temp_input_dir = video_dir / "matanyone_input"
+                    temp_output_dir = video_dir / "matanyone_output"
+                    if temp_input_dir.exists():
+                        shutil.rmtree(temp_input_dir)
+                    if temp_output_dir.exists():
+                        shutil.rmtree(temp_output_dir)
+                except Exception as e:
+                    print(f"AIEngine: Cleanup warning: {e}")

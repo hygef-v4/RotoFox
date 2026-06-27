@@ -1,8 +1,10 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import asyncio
+import os
 from fastapi.concurrency import run_in_threadpool
 from app.services.ai_engine import AIEngine
 from app.services.cache_manager import CacheManager
+from app.services.model_manager import ModelManager
 
 router = APIRouter()
 ai_engine = AIEngine()
@@ -27,6 +29,102 @@ async def websocket_endpoint(websocket: WebSocket):
                     ai_engine.video_id = video_id
                     print(f"WebSocket session linked to video_id: {video_id}")
                     await websocket.send_json({"status": "video_loaded", "video_id": video_id})
+
+            elif action == "get_system_info":
+                try:
+                    info = ModelManager.get_system_info()
+                    info["active_model"] = ai_engine.active_model_id
+                    await websocket.send_json({
+                        "status": "system_info",
+                        "system_info": info
+                    })
+                except Exception as e:
+                    await websocket.send_json({"status": "error", "message": f"Failed to get system info: {str(e)}"})
+
+            elif action == "download_model":
+                model_id = data.get("model_id")
+                try:
+                    async def report_progress(percent):
+                        await websocket.send_json({
+                            "status": "download_progress",
+                            "model_id": model_id,
+                            "progress": percent
+                        })
+                    
+                    async def do_download():
+                        try:
+                            await ModelManager.download_model_async(model_id, report_progress)
+                            await websocket.send_json({
+                                "status": "download_completed",
+                                "model_id": model_id
+                            })
+                        except Exception as e:
+                            import traceback
+                            traceback.print_exc()
+                            await websocket.send_json({
+                                "status": "download_error",
+                                "model_id": model_id,
+                                "message": str(e)
+                            })
+                    
+                    asyncio.create_task(do_download())
+                except Exception as e:
+                    await websocket.send_json({
+                        "status": "download_error",
+                        "model_id": model_id,
+                        "message": str(e)
+                    })
+
+            elif action == "load_model":
+                model_id = data.get("model_id")
+                try:
+                    await run_in_threadpool(ai_engine.load_model, model_id)
+                    await websocket.send_json({
+                        "status": "model_loaded",
+                        "model_id": model_id
+                    })
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    await websocket.send_json({"status": "error", "message": f"Failed to load model: {str(e)}"})
+
+            elif action == "set_checkpoints_dir":
+                checkpoints_dir = data.get("checkpoints_dir", "")
+                try:
+                    ModelManager.save_config(checkpoints_dir)
+                    # Recheck available checkpoints in the new directory and load the best one if possible
+                    ai_engine._init_model()
+                    
+                    info = ModelManager.get_system_info()
+                    info["active_model"] = ai_engine.active_model_id
+                    await websocket.send_json({
+                        "status": "system_info",
+                        "system_info": info
+                    })
+                except Exception as e:
+                    print(f"Error setting checkpoints directory: {e}")
+                    await websocket.send_json({"status": "error", "message": f"Failed to update model folder: {str(e)}"})
+            elif action == "open_directory":
+                directory = data.get("directory", "")
+                if not directory:
+                    directory = str(ModelManager.get_checkpoints_dir().resolve())
+                
+                def open_folder(path):
+                    import platform
+                    import subprocess
+                    try:
+                        if platform.system() == "Windows":
+                            os.startfile(path)
+                        elif platform.system() == "Darwin":
+                            subprocess.run(["open", path])
+                        else:
+                            subprocess.run(["xdg-open", path])
+                    except Exception as e:
+                        print(f"Failed to open directory {path}: {e}")
+                        
+                asyncio.create_task(run_in_threadpool(open_folder, directory))
+
+
 
             elif action == "track_forward":
                 video_id = data.get("video_id")

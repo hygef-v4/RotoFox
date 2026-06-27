@@ -1,7 +1,7 @@
 import React, { useRef } from 'react';
-import { Upload, Download, Plus, Minus, Square, RotateCcw, RectangleHorizontal, Settings, Trash2, Undo, Redo } from 'lucide-react';
+import { Upload, Download, Plus, Minus, Square, RotateCcw, RectangleHorizontal, Settings, Trash2, Undo, Redo, Cpu } from 'lucide-react';
 import logo from '../../assets/rotofox_logo.png';
-const Toolbar = ({ clickMode, setClickMode, onVideoImport, onExportClick, onClearClicks, onUndoClick, onRedoClick, viewMode, setViewMode, objects, activeObjectId, setActiveObjectId, handleAddObject, handleDeleteObject, onSettingsClick }) => {
+const Toolbar = ({ clickMode, setClickMode, onVideoImport, onExportClick, onClearClicks, onUndoClick, onRedoClick, viewMode, setViewMode, objects, activeObjectId, setActiveObjectId, handleAddObject, handleDeleteObject, onSettingsClick, onModelHubClick }) => {
   const fileInputRef = useRef(null);
 
   const handleImportClick = () => {
@@ -215,15 +215,26 @@ const Toolbar = ({ clickMode, setClickMode, onVideoImport, onExportClick, onClea
           <Download size={15} />
           Export
         </button>
-        <button 
-          onClick={onSettingsClick}
-          aria-label="Open settings configuration dialog"
-          className="w-full flex items-center justify-center gap-2 bg-white/[0.02] hover:bg-white/[0.07] text-[11px] font-semibold text-textSecondary hover:text-textPrimary px-4 py-2 rounded-lg border border-white/[0.04] transition-all duration-200 focus-visible:ring-2 focus-visible:ring-orange-500/50 focus-visible:outline-none"
-          title="Configure folder, resolution and frame rate for export"
-        >
-          <Settings size={13} />
-          Settings
-        </button>
+        <div className="grid grid-cols-2 gap-2">
+          <button 
+            onClick={onModelHubClick}
+            aria-label="Open Model Hub dialog"
+            className="flex items-center justify-center gap-1.5 bg-white/[0.02] hover:bg-white/[0.07] text-[11px] font-semibold text-textSecondary hover:text-textPrimary px-3 py-2 rounded-lg border border-white/[0.04] transition-all duration-200 focus-visible:ring-2 focus-visible:ring-orange-500/50 focus-visible:outline-none cursor-pointer"
+            title="Manage and download AI model checkpoints"
+          >
+            <Cpu size={13} className="text-orange-500" />
+            Model Hub
+          </button>
+          <button 
+            onClick={onSettingsClick}
+            aria-label="Open settings configuration dialog"
+            className="flex items-center justify-center gap-1.5 bg-white/[0.02] hover:bg-white/[0.07] text-[11px] font-semibold text-textSecondary hover:text-textPrimary px-3 py-2 rounded-lg border border-white/[0.04] transition-all duration-200 focus-visible:ring-2 focus-visible:ring-orange-500/50 focus-visible:outline-none cursor-pointer"
+            title="Configure folder, resolution and frame rate for export"
+          >
+            <Settings size={13} className="text-orange-500" />
+            Settings
+          </button>
+        </div>
       </div>
     </div>
   );

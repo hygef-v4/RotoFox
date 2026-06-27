@@ -78,6 +78,9 @@ The end-to-end workflow from import to export:
 
 ## 💻 Getting Started
 
+### ⚡ 1-Click Launch (Recommended for Developers)
+Double-click [run_all.bat](run_all.bat) at the project root. It will automatically spin up the Python backend server and the Vite frontend dev server in separate windows.
+
 ### Prerequisites
 
 | Requirement | Version |
@@ -85,14 +88,16 @@ The end-to-end workflow from import to export:
 | OS | Windows 10/11 or Ubuntu Linux |
 | Python | `3.10` or higher |
 | Node.js | `18` or `20` |
-| GPU | NVIDIA GPU with **6 GB+ VRAM** (CUDA 11.8+) |
+| GPU | NVIDIA GPU with **4 GB+ VRAM** (CUDA 11.8+) |
 | FFmpeg | Any recent version (must be in `PATH`) |
 
 > **CPU-only mode:** Supported but will be significantly slower (not recommended for video longer than ~30 seconds).
 
 ---
 
-### Step 1 — Backend Setup
+### Manual Setup
+
+#### Step 1 — Backend Setup
 
 ```bash
 # 1. Navigate to the backend directory
@@ -110,17 +115,13 @@ source .venv/bin/activate
 # 4. Install dependencies
 pip install -r requirements.txt
 
-# 5. Start the backend server  (listens on ws://localhost:8000)
+# 5. Start the backend server (listens on ws://localhost:8000)
 python main.py
 ```
 
-> 💡 **Windows shortcut:** Double-click `run_backend.bat` in the project root.
-
-The backend will automatically detect your hardware (VRAM, RAM) and configure appropriate model variants on first launch.
-
 ---
 
-### Step 2 — Frontend Setup
+#### Step 2 — Frontend Setup
 
 ```bash
 # 1. Navigate to the frontend directory
@@ -132,11 +133,13 @@ npm install
 # 3a. Launch in browser (Vite dev server)
 npm run dev
 
-# 3b.  OR launch as a desktop app (requires Tauri CLI)
+# 3b. OR launch as a desktop app (requires Tauri CLI)
 npm run tauri dev
 ```
 
-Open `http://localhost:5173` in your browser. The frontend auto-connects to the backend WebSocket at `ws://localhost:8000/ws/editor`.
+Open `http://localhost:1420` (Tauri default port) or `http://localhost:5173` in your browser. The frontend auto-connects to the backend WebSocket at `ws://localhost:8000/ws/editor`.
+
+On first launch, the **Model Hub** dialog will appear. You can configure your custom **Model Storage Folder** path (e.g. `D:\Models\SAM2`) and download the recommended model checkpoints directly from the UI.
 
 ---
 
@@ -163,7 +166,7 @@ Open `http://localhost:5173` in your browser. The frontend auto-connects to the 
 |:---|:---|
 | **Python 3.10+** | Core language |
 | **FastAPI** | Async WebSocket & REST API server |
-| **SAM 2 / SAM 3** | Object segmentation & cross-frame tracking |
+| **SAM 2.1** | Object segmentation & cross-frame tracking |
 | **MatAnyone 2** | Alpha matte refinement (hair, smoke, blur) |
 | **PyTorch + CUDA** | GPU-accelerated tensor computation |
 | **OpenCV** | Frame decoding, binary mask operations |
@@ -174,10 +177,10 @@ Open `http://localhost:5173` in your browser. The frontend auto-connects to the 
 | Technology | Role |
 |:---|:---|
 | **React 18 + Vite** | UI framework & hot-reload dev server |
-| **Tailwind CSS** | Utility-first dark-mode styling |
+| **Vanilla CSS** | Slick glassmorphism dark-mode styling |
 | **HTML5 Canvas API** | Real-time mask overlay & click prompt rendering |
 | **Lucide React** | Icon library |
-| **Tauri** | Desktop app wrapper (optional, lighter than Electron) |
+| **Tauri v2** | Desktop app wrapper (lighter and faster than Electron) |
 
 ---
 
@@ -188,30 +191,32 @@ Smart Mask Local/
 ├── backend/
 │   ├── main.py                  # FastAPI app entry point
 │   ├── requirements.txt
-│   └── app/
-│       ├── api/
-│       │   ├── routes.py        # REST endpoints (video upload)
-│       │   └── websockets.py    # WebSocket action handler
-│       ├── core/
-│       │   └── engine_state.py  # Shared AI engine state (tracking, cancel)
-│       └── services/
-│           ├── ai_engine.py     # SAM 2 + MatAnyone 2 orchestration
-│           ├── video_processor.py
-│           ├── cache_manager.py
-│           └── memory_manager.py
+│   ├── app/
+│   │   ├── api/
+│   │   │   ├── routes.py        # REST endpoints (video upload)
+│   │   │   └── websockets.py    # WebSocket action handlers
+│   │   ├── core/
+│   │   │   └── engine_state.py  # Shared AI engine state (tracking, cancel)
+│   │   └── services/
+│   │       ├── ai_engine.py     # SAM 2 + MatAnyone 2 orchestration
+│   │       ├── video_processor.py
+│   │       ├── cache_manager.py
+│   │       └── memory_manager.py
+│   └── scripts/
+│       └── package_backend.py   # Standalone sidecar packaging script
 ├── frontend/
-│   └── src/
-│       ├── App.jsx              # Root component & WebSocket manager
-│       ├── index.css
-│       └── components/
-│           ├── canvas/
-│           │   └── VideoCanvas.jsx   # HTML5 Canvas + mask renderer
-│           ├── sidebar/
-│           │   └── Toolbar.jsx       # AI tools, object list, export panel
-│           ├── timeline/             # Playback controls & frame tracks
-│           └── layout/
-├── docs/                        # Architecture & workflow diagrams
-├── run_backend.bat              # Windows one-click backend launcher
+│   ├── src/
+│   │   ├── App.jsx              # Root component & Model Hub controller
+│   │   ├── index.css
+│   │   └── components/
+│   │       ├── canvas/
+│   │       │   └── VideoCanvas.jsx   # HTML5 Canvas + mask renderer
+│   │       ├── sidebar/
+│   │       │   └── Toolbar.jsx       # AI tools, object list, export panel
+│   │       ├── timeline/             # Playback controls & frame tracks
+│   │       └── layout/
+│   └── src-tauri/               # Tauri Rust configurations & binaries
+├── run_all.bat                  # One-click dev environment launcher
 └── README.md
 ```
 
@@ -222,7 +227,7 @@ Smart Mask Local/
 - [x] **Phase 1** — PoC: SAM 2 + MatAnyone 2 pipeline validation
 - [x] **Phase 2** — Backend Engine: FastAPI WebSocket server, SSD frame cache, memory optimization
 - [x] **Phase 3** — Frontend UI: Interactive canvas, timeline controller, undo/redo, export panel
-- [ ] **Phase 4** — Deployment: One-click installer, Model Hub (auto GPU detection + checkpoint download), Beta v1.0
+- [x] **Phase 4** — Deployment: Tauri Desktop shell sidecar packaging, Model Hub hardware profiling, custom download path configurations, 1-Click Launchers (Beta v1.0)
 
 ---
 

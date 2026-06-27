@@ -4,7 +4,7 @@ import Toolbar from './components/sidebar/Toolbar';
 import VideoCanvas from './components/canvas/VideoCanvas';
 import TimelineController from './components/timeline/TimelineController';
 import { useAIEngine } from './hooks/useAIEngine';
-import { X, CheckCircle, AlertCircle, Download, Film, Settings, Copy } from 'lucide-react';
+import { X, CheckCircle, AlertCircle, Download, Film, Settings, Copy, Cpu, FolderOpen } from 'lucide-react';
 
 const OBJECT_COLORS = [
   '#FF3B30', // Red
@@ -51,6 +51,9 @@ function App() {
   const [activeObjectId, setActiveObjectId] = useState(1);
   const [deleteObjectSignal, setDeleteObjectSignal] = useState(null);
 
+  // Model Hub modal visibility
+  const [showModelHubModal, setShowModelHubModal] = useState(false);
+
   const [copied, setCopied] = useState(false);
   // IMPROVE-03: Toast notification when tracking completes
   const [showTrackingDoneToast, setShowTrackingDoneToast] = useState(false);
@@ -84,7 +87,17 @@ function App() {
     clearMaskCache,
     clearBackendState,
     removeObject,
-    trackedFrames
+    trackedFrames,
+    
+    // Model Hub
+    systemInfo,
+    downloadStatus,
+    getSystemInfo,
+    downloadModel,
+    loadModel,
+    resetDownloadStatus,
+    setCheckpointsDir,
+    openDirectory
   } = useAIEngine();
 
   const [backendFramesCount, setBackendFramesCount] = useState(null);
@@ -105,6 +118,18 @@ function App() {
   useEffect(() => { videoOffsetFrameRef_kb.current = videoOffsetFrame; }, [videoOffsetFrame]);
   const hasVideoRef_kb = useRef(false);
   useEffect(() => { hasVideoRef_kb.current = !!videoUrl; }, [videoUrl]);
+
+  const hasAutoOpenedRef = useRef(false);
+  useEffect(() => {
+    if (isConnected && systemInfo.models.length > 0 && !hasAutoOpenedRef.current) {
+      // If no models are downloaded and there is no active model loaded, pop up Model Hub
+      const hasDownloadedAny = systemInfo.models.some(m => m.downloaded);
+      if (!hasDownloadedAny && !systemInfo.active_model) {
+        hasAutoOpenedRef.current = true;
+        setShowModelHubModal(true);
+      }
+    }
+  }, [isConnected, systemInfo]);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -280,9 +305,10 @@ function App() {
             onVideoImport={handleVideoImport}
             onExportClick={() => setShowExportModal(true)}
             onSettingsClick={() => setShowSettingsModal(true)}
-            onClearClicks={handleClearClicks}
+            onModelHubClick={() => setShowModelHubModal(true)}
             onUndoClick={() => setUndoSignal(s => s + 1)}
             onRedoClick={() => setRedoSignal(s => s + 1)}
+            onClearClicks={handleClearClicks}
             viewMode={viewMode}
             setViewMode={setViewMode}
             objects={objects}
@@ -583,10 +609,266 @@ function App() {
             <button
               type="button"
               onClick={() => setShowSettingsModal(false)}
-              className="w-full mt-6 bg-white hover:bg-gray-200 text-black font-semibold py-2 rounded-lg transition-colors"
+              className="w-full mt-6 bg-white hover:bg-gray-200 text-black font-semibold py-2 rounded-lg transition-colors cursor-pointer"
             >
               Save Settings
             </button>
+          </div>
+        </div>
+      )}
+
+      {showModelHubModal && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 animate-fade-in">
+          <div className="bg-[#171717] border border-[#333] rounded-xl w-[600px] p-6 shadow-2xl relative">
+            <button 
+              onClick={() => {
+                setShowModelHubModal(false);
+                resetDownloadStatus();
+              }}
+              className="absolute top-4 right-4 text-textSecondary hover:text-textPrimary transition-colors cursor-pointer"
+            >
+              <X size={20} />
+            </button>
+
+            <h3 className="text-xl font-bold mb-1 text-textPrimary flex items-center gap-2">
+              <Cpu size={22} className="text-orange-500 animate-pulse-subtle" />
+              RotoFox AI Model Hub
+            </h3>
+            <p className="text-xs text-textSecondary mb-4">
+              Local Hardware Profiler & Segment Anything Model (SAM) Manager.
+            </p>
+
+            {/* Hardware Profile Panel */}
+            <div className="bg-black/35 rounded-lg p-3.5 border border-white/[0.04] mb-4">
+              <div className="text-[10px] font-bold text-textSecondary/60 uppercase tracking-wider mb-2">Hardware Detection Profile</div>
+              <div className="grid grid-cols-2 gap-4 text-xs">
+                <div>
+                  <span className="text-textSecondary block">Graphics Processing Unit (GPU):</span>
+                  <span className={`font-semibold ${systemInfo.gpu_available ? 'text-green-400' : 'text-orange-400'}`}>
+                    {systemInfo.gpu_name} {systemInfo.total_vram_gb ? `(${systemInfo.total_vram_gb} GB VRAM)` : ''}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-textSecondary block">System Memory (RAM):</span>
+                  <span className="font-semibold text-textPrimary">
+                    {systemInfo.system_ram_gb ? `${systemInfo.system_ram_gb} GB RAM` : 'Local Host'}
+                  </span>
+                </div>
+              </div>
+              <div className="mt-2.5 pt-2.5 border-t border-white/[0.04] flex items-center gap-2 text-xs text-textSecondary">
+                <span>Recommended configuration for your PC:</span>
+                <span className="bg-orange-500/10 text-orange-400 border border-orange-500/30 px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider">
+                  SAM 2.1 {systemInfo.recommended_model.toUpperCase()}
+                </span>
+              </div>
+            </div>
+
+            {/* Checkpoints Directory Configuration */}
+            <div className="bg-black/35 rounded-lg p-3.5 border border-white/[0.04] mb-4 animate-fade-in">
+              <div className="text-[10px] font-bold text-textSecondary/60 uppercase tracking-wider mb-2">Model Storage Folder</div>
+              <div className="flex items-center gap-2">
+                <input 
+                  type="text" 
+                  defaultValue={systemInfo.checkpoints_dir || ''}
+                  onBlur={(e) => {
+                    if (e.target.value !== systemInfo.checkpoints_dir) {
+                      setCheckpointsDir(e.target.value);
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.target.blur();
+                    }
+                  }}
+                  placeholder="e.g. D:\Models\SAM2 (Leave blank for default folder)"
+                  className="flex-1 bg-[#222] border border-[#333] rounded-lg px-3 py-1.5 text-xs text-textPrimary focus:border-orange-500 focus:outline-none transition-colors placeholder-[#555]"
+                />
+                <button
+                  type="button"
+                  onClick={() => openDirectory()}
+                  className="bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/25 text-[10px] font-bold text-orange-400 px-2.5 py-1.5 rounded-lg transition-colors cursor-pointer flex items-center gap-1.5"
+                  title="Open folder in System Explorer"
+                >
+                  <FolderOpen size={12} />
+                  Open Folder
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCheckpointsDir('');
+                  }}
+                  className="bg-white/[0.02] hover:bg-white/[0.07] border border-white/[0.04] text-[10px] font-bold text-textSecondary hover:text-textPrimary px-2.5 py-1.5 rounded-lg transition-colors cursor-pointer"
+                  title="Reset to default checkpoints directory"
+                >
+                  Reset Default
+                </button>
+              </div>
+              <p className="text-[9px] text-textSecondary/70 mt-1 leading-relaxed">
+                {systemInfo.is_custom_dir 
+                  ? "✓ Custom path active. Model checkpoints will be saved to and loaded from this directory."
+                  : "Using default local checkpoints directory inside backend application."}
+              </p>
+            </div>
+
+            {/* Download Status Panel */}
+            {downloadStatus.status === 'downloading' && (
+              <div className="mb-4 bg-orange-500/5 border border-orange-500/20 rounded-lg p-3 animate-pulse-subtle">
+                <div className="flex justify-between items-center text-xs font-semibold text-orange-400 mb-1.5">
+                  <span>{downloadStatus.message}</span>
+                  <span>{downloadStatus.progress}%</span>
+                </div>
+                <div className="w-full bg-black/40 rounded-full h-1.5 overflow-hidden">
+                  <div className="bg-orange-500 h-full transition-all duration-200" style={{ width: `${downloadStatus.progress}%` }}></div>
+                </div>
+              </div>
+            )}
+            
+            {downloadStatus.status === 'completed' && (
+              <div className="mb-4 bg-green-500/10 border border-green-500/25 rounded-lg p-2.5 flex items-center gap-2 text-xs text-green-400">
+                <CheckCircle size={15} />
+                <span>{downloadStatus.message} Model checkpoint is downloaded and ready to activate.</span>
+              </div>
+            )}
+
+            {downloadStatus.status === 'error' && (
+              <div className="mb-4 bg-red-500/10 border border-red-500/25 rounded-lg p-2.5 flex items-center gap-2 text-xs text-red-400">
+                <AlertCircle size={15} />
+                <span>{downloadStatus.message}</span>
+              </div>
+            )}
+
+            {/* Models list */}
+            <div className="space-y-4 max-h-[300px] overflow-y-auto pr-1">
+              
+              {/* SAM 2.1 section */}
+              <div>
+                <div className="text-[10px] font-bold text-orange-400/90 uppercase tracking-wider mb-2 flex items-center gap-1">
+                  <span>1. Live Object Tracking Models (SAM 2.1)</span>
+                  <span className="text-[9px] text-textSecondary/50 font-normal normal-case">(Download & activate exactly one to start prompting)</span>
+                </div>
+                
+                <div className="space-y-2">
+                  {systemInfo.models.filter(m => m.id !== 'matanyone').map((model) => {
+                    const isActive = systemInfo.active_model === model.id;
+                    const isRecommended = model.recommended;
+                    
+                    return (
+                      <div 
+                        key={model.id} 
+                        className={`flex items-center justify-between p-3 rounded-lg border transition-all ${isActive ? 'bg-orange-500/[0.03] border-orange-500/40 shadow-[0_0_12px_rgba(249,115,22,0.04)]' : 'bg-black/10 border-white/[0.04] hover:bg-white/[0.01] hover:border-white/[0.08]'}`}
+                      >
+                        <div className="flex-1 pr-4">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-textPrimary">{model.name}</span>
+                            {isRecommended && (
+                              <span className="bg-green-500/10 text-green-400 border border-green-500/20 px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wide">Recommended</span>
+                            )}
+                            {isActive && (
+                              <span className="bg-orange-500 text-white px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wide animate-pulse">Active</span>
+                            )}
+                          </div>
+                          <p className="text-[10px] text-textSecondary mt-0.5 leading-relaxed">{model.description}</p>
+                          <div className="flex gap-3 text-[9px] text-textSecondary/70 mt-1 font-mono">
+                            <span>Speed: {model.speed}</span>
+                            <span>•</span>
+                            <span>VRAM Req: {model.vram_req} GB</span>
+                            {model.downloaded && (
+                              <>
+                                <span>•</span>
+                                <span className="text-textSecondary/90 font-bold">Size: {model.size_mb} MB</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex-shrink-0">
+                          {model.downloaded ? (
+                            <button
+                              type="button"
+                              onClick={() => loadModel(model.id)}
+                              disabled={isActive || downloadStatus.status === 'downloading'}
+                              className={`px-3 py-1.5 rounded-md text-[10px] font-bold transition-all cursor-pointer ${isActive ? 'bg-white/[0.03] text-textSecondary cursor-not-allowed border border-white/[0.04]' : 'bg-white hover:bg-gray-200 text-black shadow-sm font-semibold active:scale-[0.97]'}`}
+                            >
+                              {isActive ? 'Active' : 'Activate'}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => downloadModel(model.id)}
+                              disabled={downloadStatus.status === 'downloading'}
+                              className={`px-3 py-1.5 rounded-md text-[10px] font-bold transition-all cursor-pointer ${downloadStatus.status === 'downloading' ? 'bg-[#222] text-textSecondary border border-[#333] cursor-not-allowed' : 'bg-orange-500 hover:bg-orange-600 text-white shadow-md active:scale-[0.97] border border-orange-400/20'}`}
+                            >
+                              Download
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* MatAnyone 2 section */}
+              {systemInfo.models.some(m => m.id === 'matanyone') && (
+                <div className="pt-2 border-t border-white/[0.03]">
+                  <div className="text-[10px] font-bold text-orange-400/90 uppercase tracking-wider mb-2 flex items-center gap-1">
+                    <span>2. Edge Refinement Models (MatAnyone 2)</span>
+                    <span className="text-[9px] text-textSecondary/50 font-normal normal-case">(Optional - Runs silently during Export to refine hair/edges)</span>
+                  </div>
+                  
+                  {systemInfo.models.filter(m => m.id === 'matanyone').map((model) => {
+                    const isDownloaded = model.downloaded;
+                    
+                    return (
+                      <div 
+                        key={model.id} 
+                        className={`flex items-center justify-between p-3 rounded-lg border transition-all ${isDownloaded ? 'bg-green-500/[0.01] border-green-500/20' : 'bg-black/10 border-white/[0.04] hover:bg-white/[0.01]'}`}
+                      >
+                        <div className="flex-1 pr-4">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-textPrimary">{model.name}</span>
+                            {isDownloaded && (
+                              <span className="bg-green-500/10 text-green-400 border border-green-500/20 px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wide">Ready for Export</span>
+                            )}
+                          </div>
+                          <p className="text-[10px] text-textSecondary mt-0.5 leading-relaxed">{model.description}</p>
+                          <div className="flex gap-3 text-[9px] text-textSecondary/70 mt-1 font-mono">
+                            <span>VRAM Req: {model.vram_req} GB</span>
+                            {model.downloaded && (
+                              <>
+                                <span>•</span>
+                                <span className="text-textSecondary/90 font-bold">Size: {model.size_mb} MB</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex-shrink-0">
+                          {isDownloaded ? (
+                            <span className="text-[10px] font-bold text-green-400 border border-green-500/30 bg-green-500/5 px-2.5 py-1.5 rounded-md">
+                              Installed
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => downloadModel(model.id)}
+                              disabled={downloadStatus.status === 'downloading'}
+                              className={`px-3 py-1.5 rounded-md text-[10px] font-bold transition-all cursor-pointer ${downloadStatus.status === 'downloading' ? 'bg-[#222] text-textSecondary border border-[#333] cursor-not-allowed' : 'bg-orange-500 hover:bg-orange-600 text-white shadow-md active:scale-[0.97] border border-orange-400/20'}`}
+                            >
+                              Download
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            
+            <div className="mt-5 pt-4 border-t border-white/[0.04] text-[9px] text-textSecondary text-center">
+              Make sure you have a stable internet connection for model downloads. Checkpoint weights will be stored in your backend/checkpoints directory.
+            </div>
           </div>
         </div>
       )}

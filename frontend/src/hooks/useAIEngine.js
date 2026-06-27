@@ -21,6 +21,24 @@ export function useAIEngine() {
 
   const [trackedFrames, setTrackedFrames] = useState([]);
 
+  // Model Hub states
+  const [systemInfo, setSystemInfo] = useState({
+    gpu_available: false,
+    gpu_name: 'CPU',
+    total_vram_gb: null,
+    system_ram_gb: null,
+    recommended_model: 'tiny',
+    active_model: null,
+    models: []
+  });
+
+  const [downloadStatus, setDownloadStatus] = useState({
+    model_id: null,
+    progress: 0,
+    status: 'idle', // idle, downloading, completed, error
+    message: ''
+  });
+
   // Export states
   const [exportProgress, setExportProgress] = useState(0);
   const [exportStatus, setExportStatus] = useState("idle"); // idle, rendering, completed, error
@@ -51,6 +69,10 @@ export function useAIEngine() {
         wsRef.current = ws;  // Only set ref when actually OPEN
         setIsConnected(true);
         reconnectDelay = 1000;
+        
+        // Request hardware status and available checkpoints
+        ws.send(JSON.stringify({ action: 'get_system_info' }));
+
         if (videoIdRef.current) {
           console.log('Restoring video session on reconnect:', videoIdRef.current);
           ws.send(JSON.stringify({
@@ -99,6 +121,38 @@ export function useAIEngine() {
               setTrackedFrames(Array.from(maskCacheRef.current.keys()));
             }
             setMaskImage(data.mask_base64);
+          }
+        } else if (data.status === "system_info") {
+          setSystemInfo(data.system_info);
+        } else if (data.status === "download_progress") {
+          setDownloadStatus({
+            model_id: data.model_id,
+            progress: data.progress,
+            status: 'downloading',
+            message: `Downloading model checkpoint... ${data.progress}%`
+          });
+        } else if (data.status === "download_completed") {
+          setDownloadStatus({
+            model_id: data.model_id,
+            progress: 100,
+            status: 'completed',
+            message: 'Download successful!'
+          });
+          // Refresh system info
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ action: 'get_system_info' }));
+          }
+        } else if (data.status === "download_error") {
+          setDownloadStatus({
+            model_id: data.model_id,
+            progress: 0,
+            status: 'error',
+            message: `Download failed: ${data.message}`
+          });
+        } else if (data.status === "model_loaded") {
+          // Refresh system info
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ action: 'get_system_info' }));
           }
         }
       };
@@ -310,6 +364,63 @@ export function useAIEngine() {
     }
   }, []);
 
+  const getSystemInfo = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ action: 'get_system_info' }));
+    }
+  }, []);
+
+  const downloadModel = useCallback((modelId) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setDownloadStatus({
+        model_id: modelId,
+        progress: 0,
+        status: 'downloading',
+        message: 'Initializing download...'
+      });
+      wsRef.current.send(JSON.stringify({
+        action: 'download_model',
+        model_id: modelId
+      }));
+    }
+  }, []);
+
+  const loadModel = useCallback((modelId) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        action: 'load_model',
+        model_id: modelId
+      }));
+    }
+  }, []);
+
+  const resetDownloadStatus = useCallback(() => {
+    setDownloadStatus({
+      model_id: null,
+      progress: 0,
+      status: 'idle',
+      message: ''
+    });
+  }, []);
+
+  const setCheckpointsDir = useCallback((checkpointsDir) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        action: 'set_checkpoints_dir',
+        checkpoints_dir: checkpointsDir
+      }));
+    }
+  }, []);
+
+  const openDirectory = useCallback((path = '') => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        action: 'open_directory',
+        directory: path
+      }));
+    }
+  }, []);
+
   return {
     isConnected,
     isTracking,
@@ -329,6 +440,16 @@ export function useAIEngine() {
     clearMaskCache,
     clearBackendState,
     removeObject,
-    trackedFrames
+    trackedFrames,
+    
+    // Model Hub
+    systemInfo,
+    downloadStatus,
+    getSystemInfo,
+    downloadModel,
+    loadModel,
+    resetDownloadStatus,
+    setCheckpointsDir,
+    openDirectory
   };
 };
