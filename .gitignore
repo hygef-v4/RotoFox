@@ -38,6 +38,9 @@ Thumbs.db
 # Graphify
 graphify-out/
 
+# Agents
+.agents/
+
 # PyInstaller
 backend/build/
 backend/dist/
