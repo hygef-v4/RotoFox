@@ -4,6 +4,8 @@ import Toolbar from './components/sidebar/Toolbar';
 import VideoCanvas from './components/canvas/VideoCanvas';
 import TimelineController from './components/timeline/TimelineController';
 import { useAIEngine } from './hooks/useAIEngine';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import SetupWizard from './components/setup/SetupWizard';
 import { X, CheckCircle, AlertCircle, Download, Film, Settings, Copy, Cpu, FolderOpen } from 'lucide-react';
 
 const OBJECT_COLORS = [
@@ -53,6 +55,10 @@ function App() {
 
   // Model Hub modal visibility
   const [showModelHubModal, setShowModelHubModal] = useState(false);
+
+  // Setup Wizard
+  const [showSetupWizard, setShowSetupWizard] = useState(false);
+  const [setupStatus, setSetupStatus] = useState(null);
 
   const [copied, setCopied] = useState(false);
   // IMPROVE-03: Toast notification when tracking completes
@@ -121,15 +127,21 @@ function App() {
 
   const hasAutoOpenedRef = useRef(false);
   useEffect(() => {
-    if (isConnected && systemInfo.models.length > 0 && !hasAutoOpenedRef.current) {
-      // If no models are downloaded and there is no active model loaded, pop up Model Hub
-      const hasDownloadedAny = systemInfo.models.some(m => m.downloaded);
-      if (!hasDownloadedAny && !systemInfo.active_model) {
-        hasAutoOpenedRef.current = true;
-        setShowModelHubModal(true);
-      }
-    }
-  }, [isConnected, systemInfo]);
+    if (!isConnected || hasAutoOpenedRef.current) return;
+    // Fetch setup status from backend once connected
+    fetch('http://127.0.0.1:8000/api/setup-status')
+      .then(r => r.json())
+      .then(data => {
+        setSetupStatus(data);
+        if (data.needs_setup) {
+          hasAutoOpenedRef.current = true;
+          setShowSetupWizard(true);
+        }
+      })
+      .catch(() => {
+        // Backend may not be ready yet — silently ignore
+      });
+  }, [isConnected]);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -568,13 +580,36 @@ function App() {
             <div className="space-y-5">
               <div>
                 <label className="block text-xs font-semibold text-textSecondary uppercase mb-1">Export Folder Path</label>
-                <input 
-                  type="text" 
-                  value={exportPath}
-                  onChange={(e) => setExportPath(e.target.value)}
-                  placeholder="e.g. D:\Videos\RotoFox (Leave blank for Downloads)"
-                  className="w-full bg-[#222] border border-[#333] rounded-lg p-2 text-sm text-textPrimary focus:border-orange-500 focus:outline-none transition-colors placeholder-[#555]"
-                />
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={exportPath}
+                    readOnly
+                    placeholder="Click Browse to choose a folder..."
+                    className="flex-1 bg-[#222] border border-[#333] rounded-lg p-2 text-sm text-textPrimary placeholder-[#555] cursor-default"
+                  />
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const selected = await openDialog({ directory: true, multiple: false, title: 'Choose Export Folder' });
+                      if (selected) setExportPath(selected);
+                    }}
+                    className="flex items-center gap-1.5 bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/25 text-orange-400 text-[11px] font-bold px-3 py-2 rounded-lg transition-colors flex-shrink-0"
+                  >
+                    <FolderOpen size={13} />
+                    Browse
+                  </button>
+                  {exportPath && (
+                    <button
+                      type="button"
+                      onClick={() => setExportPath('')}
+                      className="text-textSecondary hover:text-red-400 transition-colors flex-shrink-0"
+                      title="Clear path"
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
                 <p className="text-[10px] text-textSecondary mt-1">If blank, exports will be saved to your Downloads/RotoFox Exports folder.</p>
               </div>
 
@@ -871,6 +906,16 @@ function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* First-Run Setup Wizard */}
+      {showSetupWizard && setupStatus && (
+        <SetupWizard
+          setupStatus={setupStatus}
+          downloadStatus={downloadStatus}
+          downloadModel={downloadModel}
+          onComplete={() => setShowSetupWizard(false)}
+        />
       )}
     </>
   );

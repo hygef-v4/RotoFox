@@ -1,9 +1,9 @@
 @echo off
-title Smart Mask Local - Backend Server
+title RotoFox - Backend Server
 color 0A
 
 echo ============================================
-echo   Smart Mask Local - Backend Server
+echo   RotoFox - Backend Server
 echo ============================================
 echo.
 

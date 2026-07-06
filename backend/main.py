@@ -4,7 +4,7 @@ import uvicorn
 
 from app.api import routes, websockets
 
-app = FastAPI(title="SmartMask Local API")
+app = FastAPI(title="RotoFox API")
 
 app.add_middleware(
     CORSMiddleware,

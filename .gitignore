@@ -46,5 +46,13 @@ backend/build/
 backend/dist/
 *.spec
 
-# Executables
+# Executables & large binaries — never commit compiled artifacts
 *.exe
+*.dll
+*.pyd
+*.so
+
+# Tauri sidecar binaries (PyInstaller --onedir output, ~2GB+)
+# Rebuild with: backend/.venv/Scripts/python scripts/package_backend.py
+frontend/src-tauri/binaries/rotofox-backend/
+frontend/src-tauri/binaries/*.exe
