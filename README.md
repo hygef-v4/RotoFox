@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🦊 RotoFox — Smart Mask Local
+# 🦊 RotoFox — Smart Video Segmentation
 
 **Offline, AI-Powered Rotoscoping & Video Segmentation for Editors**
 
@@ -54,7 +54,7 @@ Instead of frame-by-frame manual masking, RotoFox lets you **click once** (or dr
 Below is the layout of the project, explaining the roles of the main directories and files:
 
 ```
-Smart Mask Local/
+Smart Video Segmentation/
 ├── backend/
 │   ├── main.py                  # FastAPI server entry point (restores WebSocket & API routes)
 │   ├── requirements.txt         # Python dependencies (PyTorch, OpenCV, FastAPI, etc.)

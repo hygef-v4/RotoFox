@@ -1,4 +1,4 @@
-# ĐẶC TẢ DỰ ÁN: SMARTMASK LOCAL
+# ĐẶC TẢ DỰ ÁN: ROTOFOX — SMART VIDEO SEGMENTATION
 
 **Hệ thống tự động tách nền và tạo Mặt nạ Video bằng AI chạy cục bộ**
 

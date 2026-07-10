@@ -109,7 +109,7 @@ def compile_video(frames_dir, alpha_dir, output_video):
     print("Compilation handled directly or skip for now if already built by MatAnyone.")
 
 def main():
-    parser = argparse.ArgumentParser(description="Smart Mask Local PoC Pipeline")
+    parser = argparse.ArgumentParser(description="RotoFox - Smart Video Segmentation PoC Pipeline")
     parser.add_argument("--video", type=str, required=True, help="Path to input video")
     parser.add_argument("--out", type=str, default="output.mov", help="Path to output video")
     parser.add_argument("--x", type=int, required=True, help="X coordinate for initial click")

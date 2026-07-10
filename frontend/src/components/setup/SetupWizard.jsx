@@ -107,7 +107,7 @@ export default function SetupWizard({ setupStatus, downloadStatus, downloadModel
           <div>
             <h3 className="text-base font-bold text-textPrimary">Step 1: MatAnyone 2 <span className="text-[10px] font-bold text-red-400 border border-red-500/30 bg-red-500/5 px-1.5 py-0.5 rounded ml-1">Required</span></h3>
             <p className="text-xs text-textSecondary mt-0.5 leading-relaxed">
-              Handles hair, smoke, and fine-edge refinement during export. <strong className="text-textPrimary">This model must be downloaded to use SmartMask Local.</strong>
+              Handles hair, smoke, and fine-edge refinement during export. <strong className="text-textPrimary">This model must be downloaded to use Smart Video Segmentation.</strong>
             </p>
           </div>
         </div>
