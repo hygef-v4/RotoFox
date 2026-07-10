@@ -2,25 +2,34 @@
 
 # 🦊 RotoFox — Smart Mask Local
 
-**Offline, AI-powered Rotoscoping & Video Segmentation for Editors**
+**Offline, AI-Powered Rotoscoping & Video Segmentation for Editors**
 
-[![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white)](https://react.dev)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)](https://react.dev)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.11x-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![PyTorch](https://img.shields.io/badge/PyTorch-CUDA-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org)
-[![SAM 2](https://img.shields.io/badge/SAM_2-Meta_AI-0064e0)](https://github.com/facebookresearch/segment-anything-2)
+[![SAM 2](https://img.shields.io/badge/SAM_2.1-Meta_AI-0064e0)](https://github.com/facebookresearch/segment-anything-2)
+[![Tauri](https://img.shields.io/badge/Tauri-v2-FFC107?logo=tauri&logoColor=white)](https://tauri.app)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-*The local alternative to After Effects Roto Brush & Runway — runs fully offline on your own GPU.*
+*The local alternative to After Effects Roto Brush & Runway — runs fully offline on your own GPU/CPU.*
 
 </div>
 
 ---
 
+## 🖥️ Application Interface (Before / After)
+
+| Before: Overlay View Mode (Real-time Mask Track) | After: Isolated View Mode (Background Removed) |
+| :---: | :---: |
+| ![Before - Overlay Mode](docs/rotofox_demo_before.png) | ![After - Isolated Mode](docs/rotofox_demo_after.png) |
+
+---
+
 ## 📖 What is RotoFox?
 
-**RotoFox** is a desktop-grade, 100% offline rotoscoping tool. It lets video editors and filmmakers automate the process of creating precise **video masks** — separating subjects from backgrounds — using the power of **Meta's Segment Anything Model 2 (SAM 2)** and **MatAnyone 2** for ultra-fine edge refinement (hair, smoke, motion blur).
+**RotoFox** is a desktop-grade, 100% offline rotoscoping tool. It lets video editors and filmmakers automate the process of creating precise **video masks** — separating subjects from backgrounds — using the power of **Meta's Segment Anything Model 2 (SAM 2.1)** and **MatAnyone 2** for ultra-fine edge refinement (capturing fine details like hair strands, semi-transparent smoke, and motion blur).
 
-Instead of frame-by-frame manual masking, RotoFox lets you **click once** on a subject and AI automatically tracks and generates the mask across the entire video timeline. All computation runs locally on your own NVIDIA GPU — your footage never leaves your machine.
+Instead of frame-by-frame manual masking, RotoFox lets you **click once** (or draw a box) on a subject, and the AI automatically tracks and generates the mask across the entire video timeline. All computation runs locally on your own machine (supporting GPU CUDA acceleration as well as CPU fallbacks) — your footage never leaves your machine.
 
 ---
 
@@ -28,129 +37,193 @@ Instead of frame-by-frame manual masking, RotoFox lets you **click once** on a s
 
 | Feature | Description |
 |:---|:---|
-| 🖱️ **Interactive Point-and-Click** | Left-click (Include / green dot) to define foreground, Right-click (Exclude / red dot) to clean up background leaks |
-| 🟦 **Box Selection Mode** | Draw a bounding box on the canvas for precise local segmentation prompts |
-| 🤖 **AI Propagation** | One click propagates the mask across all frames using SAM 2's Video Predictor memory bank |
-| 💇 **Hair-Level Matting** | MatAnyone 2 refines mask edges to capture hair strands, semi-transparent smoke, and motion blur |
-| ↩️ **Undo / Redo History** | Full state history with keyboard shortcuts (`Ctrl+Z`, `Ctrl+Y`, `Ctrl+Shift+Z`) synced to the backend |
-| 🎞️ **Timeline with Object Tracks** | Visual per-object track showing mask coverage across frames (up to 7 concurrent layers) |
-| ⌨️ **Keyboard Timeline Seek** | Arrow keys (1 frame), Page Up/Down (10 frames), Home/End for fast navigation |
-| 📤 **Pro Export Suite** | Export as **ProRes 4444 (.mov)** with alpha channel or a **Luma Matte Sequence** (grayscale PNGs) |
-| 🔒 **100% Offline & Secure** | Zero network calls during inference — your footage stays on your machine |
+| 🖱️ **Interactive Point-and-Click** | Left-click (Include / green dot) to define the foreground object. Right-click (Exclude / red dot) to exclude background leaks. |
+| 🟦 **Box Selection Mode** | Draw a bounding box around the subject for fast, precise localization prompts. |
+| 🤖 **AI Propagation** | Streams mask predictions frame-by-frame across the timeline using SAM 2's Video Predictor memory bank. |
+| 💇 **Hair-Level Matting** | Integrates MatAnyone 2 to refine boundaries, producing high-quality alpha matte edges. |
+| ↩️ **Undo / Redo History** | Full state history with keyboard shortcuts (`Ctrl+Z`, `Ctrl+Y`, `Ctrl+Shift+Z`) synced dynamically to the AI backend. |
+| 🎞️ **Multi-Object Timeline** | Visual timeline controller supporting up to 7 concurrent, color-coded mask layers with real-time feedback. |
+| ⌨️ **Editor-Friendly Shortcuts** | Navigation designed for standard NLE workflows (Arrow keys, Spacebar, Page Up/Down, Home/End). |
+| 📤 **Production-Ready Exports** | Export masks as transparent **ProRes 4444 (.mov)** or a **Luma Matte Sequence** (grayscale PNG images). |
+| 🔒 **100% Secure & Offline** | Zero external API calls, tracking, or telemetry — works fully offline. |
 
 ---
 
-## 🏗️ System Architecture
+## 📁 Detailed Directory Structure
 
-RotoFox uses a **Local Hybrid Architecture** where a React frontend communicates with a Python AI backend via a local WebSocket server.
+Below is the layout of the project, explaining the roles of the main directories and files:
 
-![System Architecture Diagram](docs/architecture_diagram.png)
-
-
-### Key Components
-
-- **`frontend/src/App.jsx`** — Root app managing WebSocket connection, global state (objects, masks, history), and all component orchestration
-- **`frontend/src/components/canvas/VideoCanvas.jsx`** — HTML5 Canvas rendering video frames, drawing click prompts (dots/boxes), and compositing mask overlays
-- **`frontend/src/components/timeline/`** — Frame slider, object tracks, and playback controls
-- **`backend/app/api/websockets.py`** — WebSocket router handling actions: `click`, `track_forward`, `export`, `get_mask`, `remove_object`, `clear_clicks`
-- **`backend/app/services/ai_engine.py`** — Core AI orchestration: SAM 2 inference, propagation loop, MatAnyone 2 matting, and export pipeline
-- **`backend/app/services/video_processor.py`** — FFmpeg/OpenCV video decoding and frame cache management
+```
+Smart Mask Local/
+├── backend/
+│   ├── main.py                  # FastAPI server entry point (restores WebSocket & API routes)
+│   ├── requirements.txt         # Python dependencies (PyTorch, OpenCV, FastAPI, etc.)
+│   ├── rotofox-backend.spec     # PyInstaller spec configuration for packaging the backend binary
+│   ├── app/
+│   │   ├── api/
+│   │   │   ├── routes.py        # REST endpoints (handles video upload & setup wizards)
+│   │   │   └── websockets.py    # WebSocket communication (processes click/box actions, tracking, exports)
+│   │   ├── core/
+│   │   │   └── engine_state.py  # Centralized tracking progress & cancellation controller
+│   │   └── services/
+│   │       ├── ai_engine.py     # Orchestrates SAM 2 & MatAnyone 2 models, exports, and math conversions
+│   │       ├── cache_manager.py # Handles SSD storage directory caching for JPG frame extracts
+│   │       ├── memory_manager.py# Manages system garbage collection and CUDA VRAM clearing
+│   │       ├── model_manager.py # Profiles hardware, recommends models, and runs download hub
+│   │       └── video_processor.py# Decodes video frames via OpenCV, handles FPS limits & resource closing
+│   └── scripts/
+│       ├── package_backend.py   # Script to package backend python scripts into a standalone sidecar
+│       ├── setup_models.py      # Automated download utility for AI weights
+│       └── setup_sam2.py        # Installs Segment Anything 2 module locally
+├── frontend/
+│   ├── package.json             # NPM dependencies & build scripts
+│   ├── vite.config.js           # Vite server configuration
+│   ├── src/
+│   │   ├── App.jsx              # Main UI controller, states, dialog popups, and WebSocket listener
+│   │   ├── index.css            # Styling core (dark-mode glassmorphic theme)
+│   │   ├── hooks/
+│   │   │   └── useAIEngine.js   # Custom React hook wrapper for the WebSocket server connection
+│   │   └── components/
+│   │       ├── canvas/
+│   │       │   └── VideoCanvas.jsx  # Interactive canvas displaying video, prompts (dots/boxes), and masks
+│   │       ├── layout/          # UI framework layouts
+│   │       ├── setup/
+│   │       │   └── SetupWizard.jsx  # Wizard helping download models on first run
+│   │       ├── sidebar/
+│   │       │   └── Toolbar.jsx      # toolbar for tools selection (Include, Exclude, Box, Export, Model Hub)
+│   │       └── timeline/
+│   │           └── TimelineController.jsx # Media timeline scrubbing, play/pause, frame tracks
+│   └── src-tauri/
+│       ├── tauri.conf.json      # Desktop application wrapper configurations
+│       ├── Cargo.toml           # Rust package configuration
+│       └── src/
+│           ├── main.rs          # Tauri execution entry point
+│           └── lib.rs           # Rust application setup (spawns PyInstaller sidecar binary automatically)
+├── dist/                        # Holds portable distribution builds
+├── docs/                        # Project documentation files (diagrams, walkthroughs)
+├── run_all.bat                  # Developer shortcut: starts backend server and Vite frontend concurrently
+├── run_backend.bat              # Dev shortcut: launches Python backend server
+├── build_portable.bat           # Production builder: packages application into a portable zip folder
+└── setup_and_build.bat          # Complete setup script: installs Node modules, Python venv, and builds target release
+```
 
 ---
 
-## 🔄 Processing Pipeline
+## 🏗️ System Architecture & Workflow
 
-The end-to-end workflow from import to export:
+RotoFox uses a **Local Hybrid Architecture** where the Tauri-wrapped frontend communicates with a Python AI backend sidecar via local WebSockets and REST APIs.
 
-![Processing Pipeline Diagram](docs/workflow_diagram.png)
+### 1. Architectural Layout
 
+```mermaid
+graph TD
+    User([User Editor]) -->|Interacts| Frontend[React + Vite Web App]
+    subgraph Tauri Desktop Wrapper
+        Frontend <-->|JSON Events| RustCore[Rust main.exe]
+        RustCore -->|Spawns Sidecar| BackendSidecar[PyInstaller rotofox-backend.exe]
+    end
+    BackendSidecar <-->|Local WebSockets / REST| Frontend
+    BackendSidecar -->|Inference| PyTorch[PyTorch + CUDA/CPU]
+    BackendSidecar -->|Video Output| OpenCV[OpenCV / FFmpeg]
+```
 
-**Detailed Steps:**
+### 2. Processing Pipeline
 
-1. **Import & Decode** — User uploads a video. Backend uses OpenCV/FFmpeg to decode all frames into a local SSD frame cache for fast random access during timeline scrubbing.
-2. **Interactive Prompting** — User clicks on the canvas. The frontend sends `{ points, labels, frame_idx, obj_id }` over WebSocket. SAM 2's image encoder creates an embedding and the decoder immediately returns a binary mask.
-3. **Real-time Mask Overlay** — The returned `mask_base64` is drawn as a colored transparent overlay on the canvas in real time.
-4. **AI Propagation** — User clicks "Track Forward/Backward." The SAM 2 Video Predictor streams mask updates frame-by-frame, sending progress events back to the UI.
-5. **MatAnyone 2 Matting** — The coarse SAM masks are passed through MatAnyone 2, which computes precise alpha matte values for fine edges (hair, smoke, motion blur).
-6. **Export** — FFmpeg composes the final alpha channel video (ProRes 4444 `.mov`) or outputs a PNG luma matte sequence.
+1. **Import & Downsample**: When a video is uploaded, the backend downsamples high-frame-rate clips to a default of **30 FPS** to prevent high RAM/VRAM usage. OpenCV extracts these frames into a cached JPEG directory (`cache_workspace/video_<timestamp>/`).
+2. **Interactive Prompting**: The editor inputs point or box prompts on the canvas. The frontend sends the coordinates to the backend, which feeds them into SAM 2 and sends back a base64 encoded PNG mask overlay.
+3. **Timeline Propagation**: When "Track Forward" is triggered, the SAM 2 Video Predictor runs propagation over the timeline, streaming progress packets back to the client.
+4. **MatAnyone 2 Edge Refinement**: During export, SAM 2's coarse masks pass through the MatAnyone 2 neural net to refine fine details (like hair, transparency, or motion blur).
+5. **Compositing**: OpenCV compiles the processed frames and masks to write the final output video format.
 
 ---
 
-## 💻 Getting Started
+## 💻 Installation & Setup
 
-### ⚡ 1-Click Launch (Recommended for Developers)
-Double-click [run_all.bat](run_all.bat) at the project root. It will automatically spin up the Python backend server and the Vite frontend dev server in separate windows.
+### 🚀 Developer Quickstart (Local Run)
+
+Double-click the [run_all.bat](run_all.bat) script at the project root. This launcher automatically spins up the Python backend server and the Vite dev server in separate terminal windows.
 
 ### Prerequisites
-
-| Requirement | Version |
-|:---|:---|
-| OS | Windows 10/11 or Ubuntu Linux |
-| Python | `3.10` or higher |
-| Node.js | `18` or `20` |
-| GPU | NVIDIA GPU with **4 GB+ VRAM** (CUDA 11.8+) |
-| FFmpeg | Any recent version (must be in `PATH`) |
-
-> **CPU-only mode:** Supported but will be significantly slower (not recommended for video longer than ~30 seconds).
+- **OS**: Windows 10/11 or Ubuntu Linux
+- **Python**: version `3.10` or higher (Python `3.11`/`3.12` recommended)
+- **Node.js**: version `18` or `20` (installed with npm)
+- **GPU**: NVIDIA GPU with **4 GB+ VRAM** (CUDA 11.8+ installed) is recommended. (Runs on CPU but is slow).
 
 ---
 
-### Manual Setup
+### Manual Step-by-Step Developer Setup
 
-#### Step 1 — Backend Setup
-
+#### 1. Backend Setup
 ```bash
-# 1. Navigate to the backend directory
+# Navigate to the backend directory
 cd backend
 
-# 2. Create a Python virtual environment
+# Create a virtual environment
 python -m venv .venv
 
-# 3. Activate the virtual environment
-#    Windows:
+# Activate the virtual environment
+# Windows:
 .venv\Scripts\activate
-#    macOS / Linux:
+# Linux/macOS:
 source .venv/bin/activate
 
-# 4. Install dependencies
+# Install dependencies
 pip install -r requirements.txt
 
-# 5. Start the backend server (listens on ws://localhost:8000)
+# Setup SAM 2
+python scripts/setup_sam2.py
+
+# Download AI Models (or download later via the Model Hub in the UI)
+python scripts/setup_models.py
+
+# Run the backend
 python main.py
 ```
 
----
-
-#### Step 2 — Frontend Setup
-
+#### 2. Frontend Setup
 ```bash
-# 1. Navigate to the frontend directory
-cd frontend
+# Navigate to the frontend directory
+cd ../frontend
 
-# 2. Install Node dependencies
+# Install node packages
 npm install
 
-# 3a. Launch in browser (Vite dev server)
+# Option A: Run in browser
 npm run dev
 
-# 3b. OR launch as a desktop app (requires Tauri CLI)
+# Option B: Run as a desktop application
 npm run tauri dev
 ```
 
-Open `http://localhost:1420` (Tauri default port) or `http://localhost:5173` in your browser. The frontend auto-connects to the backend WebSocket at `ws://localhost:8000/ws/editor`.
+---
 
-On first launch, the **Model Hub** dialog will appear. You can configure your custom **Model Storage Folder** path (e.g. `D:\Models\SAM2`) and download the recommended model checkpoints directly from the UI.
+## 📦 Building for Production
+
+If you want to package RotoFox into a single, production-ready desktop installation wizard (`.exe`), follow these steps:
+
+### 1. Automated Installation Setup & Build
+Simply double-click [setup_and_build.bat](setup_and_build.bat). It will automatically:
+1. Create the backend Python virtual environment.
+2. Install Python dependencies and configure SAM 2.
+3. Package the Python backend into a standalone folder using PyInstaller.
+4. Run `npm install` and compile the Tauri app into an installer executable.
+
+### 2. Standalone Installer Path
+Once built, you can find the single installation wizard at:
+`frontend/src-tauri/target/release/bundle/nsis/RotoFox_1.0.0_x64-setup.exe`
+
+Double-clicking this file installs the desktop app. Running the installed shortcut automatically runs the React interface and launches the Python AI backend sidecar invisibly in the background.
 
 ---
 
 ## ⌨️ Keyboard Shortcuts
 
-| Shortcut | Action |
+| Key Shortcut | Action |
 |:---|:---|
-| `Space` | Play / Pause playback |
-| `←` `→` | Seek backward / forward **1 frame** |
-| `Page Up` | Seek forward **10 frames** |
-| `Page Down` | Seek backward **10 frames** |
+| `Spacebar` | Play / Pause timeline playback |
+| `←` / `→` | Seek backward / forward **1 frame** |
+| `Page Up` | Jump forward **10 frames** |
+| `Page Down` | Jump backward **10 frames** |
 | `Home` | Jump to **first frame** |
 | `End` | Jump to **last frame** |
 | `Ctrl + Z` | **Undo** last prompt (point or box) |
@@ -158,113 +231,23 @@ On first launch, the **Model Hub** dialog will appear. You can configure your cu
 
 ---
 
-## 🛠️ Technology Stack
-
-### Backend (AI Core)
-
-| Technology | Role |
-|:---|:---|
-| **Python 3.10+** | Core language |
-| **FastAPI** | Async WebSocket & REST API server |
-| **SAM 2.1** | Object segmentation & cross-frame tracking |
-| **MatAnyone 2** | Alpha matte refinement (hair, smoke, blur) |
-| **PyTorch + CUDA** | GPU-accelerated tensor computation |
-| **OpenCV** | Frame decoding, binary mask operations |
-| **FFmpeg / PyAV** | Video encoding / ProRes 4444 export |
-
-### Frontend (UI)
-
-| Technology | Role |
-|:---|:---|
-| **React 18 + Vite** | UI framework & hot-reload dev server |
-| **Vanilla CSS** | Slick glassmorphism dark-mode styling |
-| **HTML5 Canvas API** | Real-time mask overlay & click prompt rendering |
-| **Lucide React** | Icon library |
-| **Tauri v2** | Desktop app wrapper (lighter and faster than Electron) |
-
----
-
-## 📁 Project Structure
-
-```
-Smart Mask Local/
-├── backend/
-│   ├── main.py                  # FastAPI app entry point
-│   ├── requirements.txt
-│   ├── app/
-│   │   ├── api/
-│   │   │   ├── routes.py        # REST endpoints (video upload)
-│   │   │   └── websockets.py    # WebSocket action handlers
-│   │   ├── core/
-│   │   │   └── engine_state.py  # Shared AI engine state (tracking, cancel)
-│   │   └── services/
-│   │       ├── ai_engine.py     # SAM 2 + MatAnyone 2 orchestration
-│   │       ├── video_processor.py
-│   │       ├── cache_manager.py
-│   │       └── memory_manager.py
-│   └── scripts/
-│       └── package_backend.py   # Standalone sidecar packaging script
-├── frontend/
-│   ├── src/
-│   │   ├── App.jsx              # Root component & Model Hub controller
-│   │   ├── index.css
-│   │   └── components/
-│   │       ├── canvas/
-│   │       │   └── VideoCanvas.jsx   # HTML5 Canvas + mask renderer
-│   │       ├── sidebar/
-│   │       │   └── Toolbar.jsx       # AI tools, object list, export panel
-│   │       ├── timeline/             # Playback controls & frame tracks
-│   │       └── layout/
-│   └── src-tauri/               # Tauri Rust configurations & binaries
-├── run_all.bat                  # One-click dev environment launcher
-└── README.md
-```
-
----
-
-## 🚧 Development Roadmap
-
-- [x] **Phase 1** — PoC: SAM 2 + MatAnyone 2 pipeline validation
-- [x] **Phase 2** — Backend Engine: FastAPI WebSocket server, SSD frame cache, memory optimization
-- [x] **Phase 3** — Frontend UI: Interactive canvas, timeline controller, undo/redo, export panel
-- [x] **Phase 4** — Deployment: Tauri Desktop shell sidecar packaging, Model Hub hardware profiling, custom download path configurations, 1-Click Launchers (Beta v1.0)
-
----
-
-## ⚡ Performance Notes
-
-| GPU | VRAM | Recommended Model | Expected Speed |
-|:---|:---|:---|:---|
-| RTX 3060 | 8 GB | SAM 2 Small | ~10–15 FPS propagation |
-| RTX 3070 / 4060 | 8 GB | SAM 2 Base+ | ~15–20 FPS |
-| RTX 3090 / 4090 | 16–24 GB | SAM 2 Large | ~25–30 FPS |
-| CPU only | — | SAM 2 Tiny | ~1–2 FPS |
-
-> Enable **TensorRT** optimization in settings for an additional ~30–50% speed boost on supported NVIDIA GPUs.
-
----
-
 ## 🤝 Contributing
 
-Contributions, bug reports, and feature requests are welcome!
-
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/my-feature`
-3. Commit your changes: `git commit -m "feat: add my feature"`
-4. Push to your branch: `git push origin feature/my-feature`
-5. Open a Pull Request
-
-Please follow [Conventional Commits](https://www.conventionalcommits.org/) for commit messages.
+Contributions are welcome! Please follow these guidelines:
+1. Fork this repository.
+2. Create a branch: `git checkout -b feature/amazing-feature`.
+3. Commit your changes following [Conventional Commits](https://www.conventionalcommits.org/).
+4. Push to the branch and open a Pull Request.
 
 ---
 
 ## 📄 License
 
-Released under the **MIT License**. See [LICENSE](LICENSE) for details.
+This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for more details.
 
 ---
 
 <div align="center">
-Made with ❤️ for rotoscoping editors who deserve better tools.<br>
+Made with ❤️ for editors and creators who want premium local tools.<br>
 <b>RotoFox</b> — because every frame of your story matters. 🦊🎬
 </div>
