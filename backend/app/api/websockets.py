@@ -22,10 +22,21 @@ async def websocket_endpoint(websocket: WebSocket):
             
             if action == "set_video_id":
                 video_id = data.get("video_id")
-                # Removed redundant load_video call because it's already done in the POST endpoint
-                # and calling it here blocks the websocket/event loop again causing infinite reconnect loops.
                 if video_id:
                     session_video_id = video_id        # link this connection to the video
+                    
+                    # If inference_state is None, or it's for a different video, load/initialize it!
+                    if ai_engine.inference_state is None or ai_engine.video_id != video_id:
+                        if ai_engine.predictor is not None:
+                            try:
+                                print(f"WebSocket: Initializing video state for {video_id} in threadpool...")
+                                await run_in_threadpool(ai_engine.load_video, video_id)
+                            except Exception as e:
+                                print(f"Error loading video state: {e}")
+                                await websocket.send_json({"status": "error", "message": f"Failed to initialize video state: {str(e)}"})
+                        else:
+                            print("WebSocket: SAM2 predictor is not loaded yet. Skipping load_video until model is loaded.")
+                    
                     ai_engine.video_id = video_id
                     print(f"WebSocket session linked to video_id: {video_id}")
                     await websocket.send_json({"status": "video_loaded", "video_id": video_id})
@@ -79,6 +90,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 model_id = data.get("model_id")
                 try:
                     await run_in_threadpool(ai_engine.load_model, model_id)
+                    # If a video was already selected/set, initialize its state now that the model is loaded!
+                    if ai_engine.video_id:
+                        try:
+                            print(f"WebSocket: Auto-initializing video state for {ai_engine.video_id} after loading model...")
+                            await run_in_threadpool(ai_engine.load_video, ai_engine.video_id)
+                        except Exception as ve:
+                            print(f"Warning: Failed to auto-initialize video state after loading model: {ve}")
                     await websocket.send_json({
                         "status": "model_loaded",
                         "model_id": model_id

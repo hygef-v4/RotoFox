@@ -26,7 +26,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
     "externalBin": [
       "binaries/rotofox-backend"
     ],
@@ -44,7 +44,7 @@
         "installerIcon": "icons/icon.ico",
         "uninstallerIcon": "icons/icon.ico",
         "startMenuFolder": "RotoFox",
-        "compression": "lzma"
+        "compression": "none"
       }
     }
   }

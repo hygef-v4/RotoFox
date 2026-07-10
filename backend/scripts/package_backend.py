@@ -33,6 +33,7 @@ def package():
         "-m",
         "PyInstaller",
         "--onedir",                      # folder mode — avoids 2GB NSIS limit
+        "-y",                            # overwrite output without confirmation
         "--name=rotofox-backend",
         # uvicorn hidden imports
         "--hidden-import=uvicorn.logging",

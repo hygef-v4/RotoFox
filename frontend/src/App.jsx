@@ -126,22 +126,49 @@ function App() {
   useEffect(() => { hasVideoRef_kb.current = !!videoUrl; }, [videoUrl]);
 
   const hasAutoOpenedRef = useRef(false);
+
+  // First-run detection via localStorage — independent of WebSocket state.
+  // Shows wizard immediately, then updates with live backend data via HTTP polling.
   useEffect(() => {
-    if (!isConnected || hasAutoOpenedRef.current) return;
-    // Fetch setup status from backend once connected
-    fetch('http://127.0.0.1:8000/api/setup-status')
-      .then(r => r.json())
-      .then(data => {
-        setSetupStatus(data);
-        if (data.needs_setup) {
-          hasAutoOpenedRef.current = true;
-          setShowSetupWizard(true);
-        }
-      })
-      .catch(() => {
-        // Backend may not be ready yet — silently ignore
-      });
-  }, [isConnected]);
+    if (hasAutoOpenedRef.current) return;
+
+    const SETUP_DONE_KEY = 'rotofox_setup_done';
+    if (localStorage.getItem(SETUP_DONE_KEY) === 'true') return;
+
+    // Show wizard immediately (loading state) on first run
+    hasAutoOpenedRef.current = true;
+    setShowSetupWizard(true);
+
+    // Poll /api/setup-status until backend is ready (retries every 2s)
+    let cancelled = false;
+    let retries = 0;
+    const MAX_RETRIES = 15; // 30 seconds
+
+    const poll = () => {
+      fetch('http://127.0.0.1:8000/api/setup-status')
+        .then(r => r.json())
+        .then(data => {
+          if (cancelled) return;
+          setSetupStatus(data);
+          if (!data.needs_setup) {
+            // All models already present — close wizard and mark done
+            localStorage.setItem(SETUP_DONE_KEY, 'true');
+            setShowSetupWizard(false);
+          }
+        })
+        .catch(() => {
+          if (cancelled) return;
+          retries++;
+          if (retries >= MAX_RETRIES) {
+            setSetupStatus({ error: "Backend failed to start after 30 seconds. Please check if your system meets the requirements or if another app is using port 8000." });
+          } else {
+            setTimeout(poll, 2000);
+          }
+        });
+    };
+    poll();
+    return () => { cancelled = true; };
+  }, []);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -909,12 +936,15 @@ function App() {
       )}
 
       {/* First-Run Setup Wizard */}
-      {showSetupWizard && setupStatus && (
+      {showSetupWizard && (
         <SetupWizard
           setupStatus={setupStatus}
           downloadStatus={downloadStatus}
           downloadModel={downloadModel}
-          onComplete={() => setShowSetupWizard(false)}
+          onComplete={() => {
+            localStorage.setItem('rotofox_setup_done', 'true');
+            setShowSetupWizard(false);
+          }}
         />
       )}
     </>

@@ -28,6 +28,14 @@ export default function SetupWizard({ setupStatus, downloadStatus, downloadModel
   const [matanyoneDone, setMatanyoneDone] = useState(setupStatus?.matanyone_ready ?? false);
   const [samDone, setSamDone] = useState(setupStatus?.sam_ready ?? false);
 
+  // Sync done state when setupStatus arrives after initial render (loading→data)
+  useEffect(() => {
+    if (!setupStatus) return;
+    setMatanyoneDone(setupStatus.matanyone_ready ?? false);
+    setSamDone(setupStatus.sam_ready ?? false);
+  }, [setupStatus]);
+
+
   const samModels = (setupStatus?.models ?? []).filter(m => m.id !== 'matanyone');
   const recommendedSam = setupStatus?.recommended_sam ?? 'base';
 
@@ -314,8 +322,39 @@ export default function SetupWizard({ setupStatus, downloadStatus, downloadModel
   return (
     <div className="fixed inset-0 bg-black/90 flex items-center justify-center z-[100] backdrop-blur-sm">
       <div className="bg-[#111] border border-white/[0.06] rounded-2xl w-[520px] max-h-[90vh] overflow-y-auto shadow-2xl">
-        {/* Progress bar */}
-        <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-white/[0.04]">
+
+        {/* Loading skeleton — backend still starting */}
+        {!setupStatus && (
+          <div className="flex flex-col items-center justify-center py-16 px-8 text-center">
+            <div className="w-14 h-14 rounded-2xl bg-orange-500/10 border border-orange-500/20 flex items-center justify-center mb-5">
+              <div className="w-6 h-6 border-2 border-orange-500/30 border-t-orange-500 rounded-full animate-spin" />
+            </div>
+            <h3 className="text-base font-bold text-textPrimary mb-1">Starting AI Core…</h3>
+            <p className="text-xs text-textSecondary max-w-xs leading-relaxed">
+              Waiting for backend to initialize. This may take up to 30 seconds on first launch.
+            </p>
+          </div>
+        )}
+
+        {setupStatus?.error && (
+          <div className="flex flex-col items-center justify-center py-16 px-8 text-center">
+            <div className="w-14 h-14 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mb-5">
+              <AlertCircle size={24} className="text-red-500" />
+            </div>
+            <h3 className="text-base font-bold text-textPrimary mb-1">Initialization Failed</h3>
+            <p className="text-xs text-textSecondary max-w-xs leading-relaxed">
+              {setupStatus.error}
+            </p>
+            <button onClick={() => window.location.reload()} className="mt-6 px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-sm text-white transition-all border border-white/10 hover:border-white/20">
+              Retry Connection
+            </button>
+          </div>
+        )}
+
+        {setupStatus && !setupStatus.error && (
+          <>
+            {/* Progress bar */}
+            <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-white/[0.04]">
           {steps.map((label, idx) => (
             <div key={label} className="flex items-center gap-2">
               <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold transition-all
@@ -332,13 +371,15 @@ export default function SetupWizard({ setupStatus, downloadStatus, downloadModel
           ))}
         </div>
 
-        {/* Content */}
-        <div className="p-6">
-          {step === STEP_WELCOME && renderWelcome()}
-          {step === STEP_MATANYONE && renderMatanyone()}
-          {step === STEP_SAM && renderSam()}
-          {step === STEP_DONE && renderDone()}
-        </div>
+            {/* Content */}
+            <div className="p-6">
+              {step === STEP_WELCOME && renderWelcome()}
+              {step === STEP_MATANYONE && renderMatanyone()}
+              {step === STEP_SAM && renderSam()}
+              {step === STEP_DONE && renderDone()}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

@@ -1,4 +1,5 @@
-use tauri_plugin_shell::ShellExt;
+use std::env;
+use std::process::Command;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -11,26 +12,26 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            // Spawn the python backend sidecar.
-            // NOTE: With PyInstaller --onedir, Tauri bundles the .exe from
-            // binaries/rotofox-backend-x86_64-pc-windows-msvc.exe but the
-            // DLLs live in binaries/rotofox-backend/ beside it.
-            // Tauri's sidecar() resolves the correct target-triple path automatically.
-            match app.shell().sidecar("rotofox-backend") {
-                Ok(sidecar) => {
-                    match sidecar.spawn() {
-                        Ok((_rx, _child)) => {
-                            println!("RotoFox sidecar backend spawned successfully.");
-                        }
-                        Err(err) => {
-                            eprintln!("Error: failed to spawn sidecar backend child process: {}", err);
-                        }
-                    }
+            // Fix portable working directory issue:
+            // Ensure the app's working directory is the folder containing the executable.
+            // This is critical for PyInstaller --onedir sidecars to find their _internal/ folder.
+            if let Ok(exe_path) = env::current_exe() {
+                if let Some(exe_dir) = exe_path.parent() {
+                    let _ = env::set_current_dir(exe_dir);
+                    println!("Set working directory to: {}", exe_dir.display());
+                }
+            }
+
+            // Spawn the python backend sidecar manually.
+            // Since we set current_dir, it will find it right next to the .exe.
+            let sidecar_exe = "rotofox-backend-x86_64-pc-windows-msvc.exe";
+            match Command::new(sidecar_exe).spawn() {
+                Ok(child) => {
+                    println!("RotoFox sidecar backend spawned successfully (PID: {}).", child.id());
                 }
                 Err(err) => {
-                    eprintln!("Error: failed to initialize sidecar backend binary: {}", err);
+                    eprintln!("Error: failed to spawn sidecar backend child process: {}", err);
                 }
             }
             Ok(())

@@ -38,11 +38,11 @@ class CacheManager:
         """Xóa toàn bộ cache của một video để giải phóng SSD."""
         video_dir = CACHE_BASE_DIR / video_id
         if video_dir.exists():
-            shutil.rmtree(video_dir)
+            shutil.rmtree(video_dir, ignore_errors=True)
 
     @staticmethod
     def clear_all_cache():
         """Xóa toàn bộ thư mục cache (Dùng khi app tắt/khởi động lại)."""
         if CACHE_BASE_DIR.exists():
-            shutil.rmtree(CACHE_BASE_DIR)
+            shutil.rmtree(CACHE_BASE_DIR, ignore_errors=True)
         CACHE_BASE_DIR.mkdir(parents=True, exist_ok=True)

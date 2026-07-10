@@ -1,12 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 
+from PyInstaller.utils.hooks import collect_submodules
+
+sam2_hidden = collect_submodules('sam2')
+
 a = Analysis(
     ['F:\\code\\git\\Smart Mask Local\\backend\\main.py'],
-    pathex=[],
+    pathex=['F:\\code\\git\\Smart Mask Local\\backend\\sam2_src'],
     binaries=[],
-    datas=[],
-    hiddenimports=['uvicorn.logging', 'uvicorn.loops', 'uvicorn.loops.auto', 'uvicorn.protocols', 'uvicorn.protocols.http', 'uvicorn.protocols.http.auto', 'uvicorn.protocols.websockets', 'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan', 'uvicorn.lifespan.on', 'websockets.legacy', 'websockets.legacy.server'],
+    datas=[('F:\\code\\git\\Smart Mask Local\\backend\\sam2_src\\sam2\\configs', 'sam2\\configs')],
+    hiddenimports=['uvicorn.logging', 'uvicorn.loops', 'uvicorn.loops.auto', 'uvicorn.protocols', 'uvicorn.protocols.http', 'uvicorn.protocols.http.auto', 'uvicorn.protocols.websockets', 'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan', 'uvicorn.lifespan.on', 'websockets.legacy', 'websockets.legacy.server', 'sam2', 'hydra', 'omegaconf', 'iopath'] + sam2_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -53,7 +53,11 @@ MODELS = {
     }
 }
 
-CONFIG_FILE = Path(__file__).parent.parent.parent / "rotofox_config.json"
+import sys
+if getattr(sys, 'frozen', False):
+    CONFIG_FILE = Path(sys.executable).parent / "rotofox_config.json"
+else:
+    CONFIG_FILE = Path(__file__).parent.parent.parent / "rotofox_config.json"
 
 class ModelManager:
     _custom_checkpoints_dir = None
@@ -82,6 +86,8 @@ class ModelManager:
     @classmethod
     def get_checkpoints_dir(cls) -> Path:
         """Returns the checkpoints directory path."""
+        import sys
+        
         # Initialize configuration if not loaded yet
         if cls._custom_checkpoints_dir is None and CONFIG_FILE.exists():
             cls.load_config()
@@ -91,7 +97,12 @@ class ModelManager:
             path.mkdir(exist_ok=True, parents=True)
             return path
             
-        base_dir = Path(__file__).parent.parent.parent
+        # Handle PyInstaller frozen executable
+        if getattr(sys, 'frozen', False):
+            base_dir = Path(sys.executable).parent
+        else:
+            base_dir = Path(__file__).parent.parent.parent
+            
         checkpoint_dir = base_dir / "checkpoints"
         checkpoint_dir.mkdir(exist_ok=True)
         return checkpoint_dir
