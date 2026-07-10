@@ -38,8 +38,8 @@ graph TD
         API[REST API endpoints]
         
         subgraph "AI Core Processing"
-            SAM2["SAM 2.1 Service<br/>(Tracking & Segmentation)"]
-            MatAnyone["MatAnyone 2 Service<br/>(Matting & Refinement)"]
+            SAM2["SAM 2.1 Service<br/>(Tracking and Segmentation)"]
+            MatAnyone["MatAnyone 2 Service<br/>(Matting and Refinement)"]
         end
         
         subgraph "I/O & Storage Core"
