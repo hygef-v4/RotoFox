@@ -148,7 +148,67 @@ graph TD
 
 ---
 
-### 2. Processing Pipeline
+### 2. Execution Sequence Diagram
+
+The diagram below details the sequence of network and local process events during a user's rotoscoping session:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as User Editor
+    participant FE as React Frontend
+    participant Rust as Tauri Rust Wrapper
+    participant BE as FastAPI Backend Sidecar
+    participant SAM2 as SAM 2.1 Engine
+    participant MA2 as MatAnyone 2 Engine
+
+    Note over User, BE: Initializing Application
+    Rust->>BE: Spawn sidecar process
+    FE->>BE: Connect to WebSocket (ws://localhost:8000/ws/editor)
+    
+    Note over User, BE: Video Import & Setup
+    User->>FE: Import Video File
+    FE->>BE: POST /upload (video file)
+    BE->>BE: Downsample to 30 FPS & extract frames to SSD cache
+    BE->>SAM2: Initialize inference state with frame cache
+    BE-->>FE: Return frames count & effective FPS
+    
+    Note over User, BE: Interactive Prompting
+    User->>FE: Click/Draw Box on canvas
+    FE->>BE: Send click/box coordinates {points, labels, frame_idx, obj_id}
+    BE->>SAM2: add_new_points_or_box()
+    SAM2-->>BE: Return prediction logits
+    BE->>BE: Convert logits to base64 mask overlay
+    BE-->>FE: Stream mask_update (base64 image)
+    FE->>User: Render mask overlay on canvas
+    
+    Note over User, BE: Timeline Tracking (Propagation)
+    User->>FE: Click "Track Forward"
+    FE->>BE: Send tracking command over WS
+    loop For each frame
+        BE->>SAM2: propagate_in_video()
+        SAM2-->>BE: Frame mask prediction
+        BE->>BE: Save PNG mask to disk cache
+        BE-->>FE: Stream tracking progress (frame, progress, mask_base64)
+        FE->>User: Update timeline frame & overlay
+    end
+    BE-->>FE: Stream completed status
+    
+    Note over User, BE: Project Export
+    User->>FE: Click "Export"
+    FE->>BE: Send export settings {format, type, bg_color}
+    alt If MatAnyone 2 is downloaded
+        BE->>MA2: Load model & run edge matte refinement
+        MA2-->>BE: Output refined sub-pixel alpha mattes
+    else If MatAnyone 2 is not available
+        BE->>BE: Fallback to SAM 2 raw masks
+    end
+    BE->>BE: Composite frames with masks (ProRes / Luma Matte)
+    BE-->>FE: Stream export progress & export_completed (file_path)
+    FE->>User: Show success message & export folder path
+```
+
+### 3. Processing Pipeline
 
 1. **Import & Downsample**: When a video is uploaded, the backend downsamples high-frame-rate clips to a default of **30 FPS** to prevent high RAM/VRAM usage. OpenCV extracts these frames into a cached JPEG directory (`cache_workspace/video_<timestamp>/`).
 2. **Interactive Prompting**: The editor inputs point or box prompts on the canvas. The frontend sends the coordinates to the backend, which feeds them into SAM 2 and sends back a base64 encoded PNG mask overlay.
