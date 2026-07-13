@@ -1,11 +1,19 @@
-import os
-import torch
+"""Model Management Hub.
+
+This module handles querying hardware specifications (VRAM, RAM, GPU availability),
+maintaining configuration settings (checkpoint directories), recommending optimal
+segmentation models, and downloading weight checkpoints asynchronously from Hugging Face.
+"""
+
 import json
 import urllib.request
 from pathlib import Path
+from typing import Dict, Any, List, Callable, Optional
+import torch
 from fastapi.concurrency import run_in_threadpool
 
-MODELS = {
+# Registry of supported models and their resource requirements
+MODELS: Dict[str, Dict[str, Any]] = {
     "tiny": {
         "name": "SAM 2.1 Tiny",
         "url": "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt",
@@ -55,15 +63,19 @@ MODELS = {
 
 import sys
 if getattr(sys, 'frozen', False):
-    CONFIG_FILE = Path(sys.executable).parent / "rotofox_config.json"
+    CONFIG_FILE: Path = Path(sys.executable).parent / "rotofox_config.json"
 else:
-    CONFIG_FILE = Path(__file__).parent.parent.parent / "rotofox_config.json"
+    CONFIG_FILE: Path = Path(__file__).parent.parent.parent / "rotofox_config.json"
+
 
 class ModelManager:
-    _custom_checkpoints_dir = None
+    """Manages model checkpoints, settings, and hardware recommendations."""
+
+    _custom_checkpoints_dir: Optional[str] = None
 
     @classmethod
-    def load_config(cls):
+    def load_config(cls) -> None:
+        """Load user configuration from the config file."""
         if CONFIG_FILE.exists():
             try:
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -73,7 +85,12 @@ class ModelManager:
                 print(f"ModelManager: Error loading config: {e}")
 
     @classmethod
-    def save_config(cls, checkpoints_dir: str):
+    def save_config(cls, checkpoints_dir: str) -> None:
+        """Save a new checkpoints directory path to the config file.
+
+        Args:
+            checkpoints_dir (str): Path to the target checkpoints folder.
+        """
         cls._custom_checkpoints_dir = checkpoints_dir.strip() if checkpoints_dir and checkpoints_dir.strip() else None
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -85,41 +102,47 @@ class ModelManager:
 
     @classmethod
     def get_checkpoints_dir(cls) -> Path:
-        """Returns the checkpoints directory path."""
-        import sys
-        
+        """Resolve and retrieve the active checkpoints folder path.
+
+        Returns:
+            Path: The resolved directory path.
+        """
         # Initialize configuration if not loaded yet
         if cls._custom_checkpoints_dir is None and CONFIG_FILE.exists():
             cls.load_config()
-            
+
         if cls._custom_checkpoints_dir:
             path = Path(cls._custom_checkpoints_dir)
             path.mkdir(exist_ok=True, parents=True)
             return path
-            
-        # Handle PyInstaller frozen executable
+
+        # Handle path resolution when running packaged PyInstaller executable
         if getattr(sys, 'frozen', False):
             base_dir = Path(sys.executable).parent
         else:
             base_dir = Path(__file__).parent.parent.parent
-            
+
         checkpoint_dir = base_dir / "checkpoints"
         checkpoint_dir.mkdir(exist_ok=True)
         return checkpoint_dir
 
     @classmethod
-    def get_system_info(cls):
-        """Profile GPU capabilities and System RAM to recommend the best model."""
+    def get_system_info(cls) -> Dict[str, Any]:
+        """Profile host GPU VRAM and System RAM to identify the best model candidate.
+
+        Returns:
+            dict: System metrics, checkpoints directory, and list of supported models.
+        """
         gpu_available = torch.cuda.is_available()
         gpu_name = torch.cuda.get_device_name(0) if gpu_available else "CPU"
-        
+
         total_vram_gb = None
         if gpu_available:
             try:
                 total_vram_gb = round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 1)
             except Exception:
                 pass
-                
+
         system_ram_gb = None
         try:
             import psutil
@@ -128,7 +151,7 @@ class ModelManager:
             pass
 
         # Determine recommended model based on available VRAM
-        recommended_model = "tiny" # Fallback/CPU default
+        recommended_model = "tiny"  # Default fallback for CPU
         if gpu_available and total_vram_gb is not None:
             if total_vram_gb >= 8.0:
                 recommended_model = "large"
@@ -140,19 +163,19 @@ class ModelManager:
                 recommended_model = "tiny"
 
         checkpoints_dir = cls.get_checkpoints_dir()
-        
-        # Build model status list
-        model_list = []
+
+        # Build list of status dictionaries for all registry models
+        model_list: List[Dict[str, Any]] = []
         for model_id, info in MODELS.items():
             checkpoint_path = checkpoints_dir / info["checkpoint"]
             downloaded = checkpoint_path.exists()
-            size_mb = 0
+            size_mb = 0.0
             if downloaded:
                 try:
                     size_mb = round(checkpoint_path.stat().st_size / (1024**2), 1)
                 except Exception:
                     pass
-            
+
             model_list.append({
                 "id": model_id,
                 "name": info["name"],
@@ -176,11 +199,19 @@ class ModelManager:
         }
 
     @classmethod
-    async def download_model_async(cls, model_id: str, on_progress_callback):
-        """Asynchronously download the model file and notify progress."""
+    async def download_model_async(cls, model_id: str, on_progress_callback: Callable[[int], Any]) -> None:
+        """Download a model checkpoint asynchronously while notifying progress.
+
+        Args:
+            model_id (str): ID of the model in the registry.
+            on_progress_callback (callable): A progress callback function(percent_int).
+
+        Raises:
+            ValueError: If the model_id is not found in the registry.
+        """
         if model_id not in MODELS:
             raise ValueError(f"Unknown model: {model_id}")
-            
+
         model_info = MODELS[model_id]
         url = model_info["url"]
         dest_path = cls.get_checkpoints_dir() / model_info["checkpoint"]
@@ -189,14 +220,14 @@ class ModelManager:
             req = urllib.request.Request(url, headers={'User-Agent': 'RotoFoxModelHub/1.0'})
             return urllib.request.urlopen(req)
 
-        # Open connection in a threadpool so it doesn't block the event loop
+        # Open network connection asynchronously on threadpool
         conn = await run_in_threadpool(open_connection)
         try:
             total_size = int(conn.info().get('Content-Length', -1))
             downloaded = 0
-            block_size = 1024 * 256 # 256KB block size
-            
-            # Write file in threadpool chunk by chunk
+            block_size = 1024 * 256  # 256KB block size
+
+            # Write file chunks asynchronously
             with open(dest_path, "wb") as f:
                 while True:
                     chunk = await run_in_threadpool(conn.read, block_size)
@@ -209,5 +240,6 @@ class ModelManager:
                         await on_progress_callback(percent)
         finally:
             conn.close()
-            
+
         print(f"ModelManager: Downloaded {model_id} checkpoint successfully to {dest_path}")
+

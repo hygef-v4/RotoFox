@@ -1,6 +1,17 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+"""WebSocket communication for RotoFox.
+
+This module handles real-time bidirectional communication between the React frontend
+and the Python backend, processing click events, starting propagation tracking,
+and streaming export logs.
+"""
+
 import asyncio
 import os
+import shutil
+import base64
+import platform
+import subprocess
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from app.services.ai_engine import AIEngine
 from app.services.cache_manager import CacheManager
@@ -9,23 +20,30 @@ from app.services.model_manager import ModelManager
 router = APIRouter()
 ai_engine = AIEngine()
 
+
 @router.websocket("/ws/editor")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket) -> None:
+    """Accept and handle incoming WebSocket connections from the editor UI.
+
+    Args:
+        websocket (WebSocket): The active WebSocket connection.
+    """
     await websocket.accept()
     print("WebSocket connection established with client")
-    session_video_id = None   # per-connection state – prevents cross-connection contamination
+    session_video_id = None  # Per-connection session tracking to avoid contamination
+
     try:
         while True:
             data = await websocket.receive_json()
             action = data.get("action")
             print(f"WebSocket action received: {action}")
-            
+
             if action == "set_video_id":
                 video_id = data.get("video_id")
                 if video_id:
-                    session_video_id = video_id        # link this connection to the video
-                    
-                    # If inference_state is None, or it's for a different video, load/initialize it!
+                    session_video_id = video_id
+
+                    # Initialize video state if no state is loaded or video changed
                     if ai_engine.inference_state is None or ai_engine.video_id != video_id:
                         if ai_engine.predictor is not None:
                             try:
@@ -33,10 +51,13 @@ async def websocket_endpoint(websocket: WebSocket):
                                 await run_in_threadpool(ai_engine.load_video, video_id)
                             except Exception as e:
                                 print(f"Error loading video state: {e}")
-                                await websocket.send_json({"status": "error", "message": f"Failed to initialize video state: {str(e)}"})
+                                await websocket.send_json({
+                                    "status": "error",
+                                    "message": f"Failed to initialize video state: {str(e)}"
+                                })
                         else:
-                            print("WebSocket: SAM2 predictor is not loaded yet. Skipping load_video until model is loaded.")
-                    
+                            print("WebSocket: SAM2 predictor is not loaded yet. Skipping load_video.")
+
                     ai_engine.video_id = video_id
                     print(f"WebSocket session linked to video_id: {video_id}")
                     await websocket.send_json({"status": "video_loaded", "video_id": video_id})
@@ -55,29 +76,29 @@ async def websocket_endpoint(websocket: WebSocket):
             elif action == "download_model":
                 model_id = data.get("model_id")
                 try:
-                    async def report_progress(percent):
+                    async def report_progress(percent: int) -> None:
                         await websocket.send_json({
                             "status": "download_progress",
                             "model_id": model_id,
                             "progress": percent
                         })
-                    
-                    async def do_download():
+
+                    async def do_download() -> None:
                         try:
                             await ModelManager.download_model_async(model_id, report_progress)
                             await websocket.send_json({
                                 "status": "download_completed",
                                 "model_id": model_id
                             })
-                        except Exception as e:
+                        except Exception as de:
                             import traceback
                             traceback.print_exc()
                             await websocket.send_json({
                                 "status": "download_error",
                                 "model_id": model_id,
-                                "message": str(e)
+                                "message": str(de)
                             })
-                    
+
                     asyncio.create_task(do_download())
                 except Exception as e:
                     await websocket.send_json({
@@ -90,10 +111,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 model_id = data.get("model_id")
                 try:
                     await run_in_threadpool(ai_engine.load_model, model_id)
-                    # If a video was already selected/set, initialize its state now that the model is loaded!
+                    # Automatically initialize video state if a video ID is already selected
                     if ai_engine.video_id:
                         try:
-                            print(f"WebSocket: Auto-initializing video state for {ai_engine.video_id} after loading model...")
+                            print(f"WebSocket: Auto-initializing video state for {ai_engine.video_id}...")
                             await run_in_threadpool(ai_engine.load_video, ai_engine.video_id)
                         except Exception as ve:
                             print(f"Warning: Failed to auto-initialize video state after loading model: {ve}")
@@ -110,9 +131,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 checkpoints_dir = data.get("checkpoints_dir", "")
                 try:
                     ModelManager.save_config(checkpoints_dir)
-                    # Recheck available checkpoints in the new directory and load the best one if possible
+                    # Refresh the active model using checkpoints in the new directory
                     ai_engine._init_model()
-                    
+
                     info = ModelManager.get_system_info()
                     info["active_model"] = ai_engine.active_model_id
                     await websocket.send_json({
@@ -122,14 +143,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 except Exception as e:
                     print(f"Error setting checkpoints directory: {e}")
                     await websocket.send_json({"status": "error", "message": f"Failed to update model folder: {str(e)}"})
+
             elif action == "open_directory":
                 directory = data.get("directory", "")
                 if not directory:
                     directory = str(ModelManager.get_checkpoints_dir().resolve())
-                
-                def open_folder(path):
-                    import platform
-                    import subprocess
+
+                def open_folder(path: str) -> None:
                     try:
                         if platform.system() == "Windows":
                             os.startfile(path)
@@ -137,12 +157,10 @@ async def websocket_endpoint(websocket: WebSocket):
                             subprocess.run(["open", path])
                         else:
                             subprocess.run(["xdg-open", path])
-                    except Exception as e:
-                        print(f"Failed to open directory {path}: {e}")
-                        
+                    except Exception as oe:
+                        print(f"Failed to open directory {path}: {oe}")
+
                 asyncio.create_task(run_in_threadpool(open_folder, directory))
-
-
 
             elif action == "track_forward":
                 video_id = data.get("video_id")
@@ -150,30 +168,22 @@ async def websocket_endpoint(websocket: WebSocket):
                 start_frame = data.get("start_frame", None)
                 print(f"[track_forward] start_frame={start_frame}, "
                       f"interaction_frames={sorted(ai_engine.interaction_frames)}")
-                
-                # Always respect the frontend's start_frame.
-                # SAM2 retains its memory bank from previous propagation runs, so:
-                #   - Forward track: propagate_in_video(start_frame_idx=200) works because
-                #     SAM2 already has memory for frames 0-199.
-                #   - Correction: user changes annotation at frame 50, clicks Track from 50.
-                #     propagate_in_video(start_frame_idx=50) re-predicts 50+ using
-                #     memory[0-49] + updated annotation[50] — correct result, no restart needed.
-                
-                # Use ai_engine's own state so propagation sees is_tracking=True
+
                 ai_engine.state.start_tracking(video_id, total_frames)
-                
-                # Propagation is a long-running generator with awaits inside.
+                # Run propagation asynchronously in background
                 asyncio.create_task(ai_engine.run_propagation(websocket, start_frame))
 
-                
             elif action == "cancel_tracking":
                 ai_engine.state.request_cancel()
-                
+
             elif action == "click":
-                # Guard: ensure this connection is linked to a video before processing
+                # Ensure the connection session is active and linked to a video ID
                 if not session_video_id:
-                    print(f"Warning: click received but no video_id linked to this connection. Ignoring.")
-                    await websocket.send_json({"status": "error", "message": "No video_id linked to this WebSocket connection. Send set_video_id first."})
+                    print("Warning: click received but no video_id linked to this connection. Ignoring.")
+                    await websocket.send_json({
+                        "status": "error",
+                        "message": "No video_id linked to this WebSocket connection. Send set_video_id first."
+                    })
                     continue
 
                 points = data.get("points", [])
@@ -181,21 +191,21 @@ async def websocket_endpoint(websocket: WebSocket):
                 box = data.get("box", None)
                 frame_idx = data.get("frame_idx", 0)
                 obj_id = data.get("obj_id", 1)
-                
+
                 try:
-                    # Run PyTorch operation in threadpool so it doesn't block websocket pings
+                    # Run PyTorch operation in threadpool to prevent blocking the event loop
                     mask_b64 = await run_in_threadpool(
                         ai_engine.add_point_or_box,
-                        frame_idx=frame_idx, 
+                        frame_idx=frame_idx,
                         obj_id=obj_id,
                         points=points,
                         labels=labels,
-                        box=box, 
-                        width=ai_engine.video_width, 
+                        box=box,
+                        width=ai_engine.video_width,
                         height=ai_engine.video_height
                     )
                     await websocket.send_json({
-                        "status": "received", 
+                        "status": "received",
                         "echo": data,
                         "mask_base64": mask_b64
                     })
@@ -205,25 +215,20 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif action == "clear_clicks":
                 try:
-                    # BUG-01 FIX: was checking `frames_dir` which doesn't exist on AIEngine.
-                    # Now checks inference_state directly.
                     if ai_engine.inference_state is not None and ai_engine.predictor is not None:
-                        # Reset SAM 2 state to clear all points and memory
+                        # Clear points and memory in the active SAM 2 state
                         await run_in_threadpool(ai_engine.predictor.reset_state, ai_engine.inference_state)
-                        
-                        # Clear old masks from disk so UI doesn't load stale data when scrubbing
+
+                        # Delete stale masks from disk to prevent UI reload issues
                         if ai_engine.video_id:
                             mask_dir = CacheManager.get_video_dir(ai_engine.video_id) / "masks"
                             if mask_dir.exists():
-                                import shutil
                                 shutil.rmtree(mask_dir)
                                 mask_dir.mkdir(parents=True, exist_ok=True)
-                            print(f"WebSocket: SAM2 state reset and masks cleared for video {ai_engine.video_id}.")
-                        
-                        # Also clear interaction history so correction logic starts fresh
+                            print(f"WebSocket: SAM2 state reset and masks cleared for {ai_engine.video_id}.")
+
                         ai_engine.interaction_frames.clear()
-                        
-                    # Always send an empty mask back so the frontend clears visually
+
                     await websocket.send_json({
                         "status": "mask_update",
                         "frame": data.get("frame_idx", 0),
@@ -231,7 +236,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
                 except Exception as e:
                     print(f"Error clearing clicks: {e}")
-                
+
             elif action == "remove_object":
                 obj_id = data.get("obj_id", 1)
                 frame_idx = data.get("frame_idx", 0)
@@ -247,25 +252,22 @@ async def websocket_endpoint(websocket: WebSocket):
                     print(f"Error removing object: {e}")
 
             elif action == "export":
-                # Data is now sent flat from frontend
+                # Start export process in background task
                 asyncio.create_task(ai_engine.run_export(websocket, data))
 
             elif action == "get_mask":
                 frame_idx = data.get("frame_idx", 0)
                 try:
-                    import base64
-                    
                     if not ai_engine.video_id:
                         await websocket.send_json({"status": "mask_update", "frame": frame_idx, "mask_base64": None})
                         continue
 
                     mask_dir = CacheManager.get_video_dir(ai_engine.video_id) / "masks"
                     mask_path = mask_dir / f"{frame_idx:05d}.png"
-                    
+
                     if mask_path.exists():
-                        # BUG-02 FIX: Read RGBA PNG as-is and re-encode to base64.
-                        # Previous code converted to grayscale and lost multi-object color data.
-                        def read_and_encode(path):
+                        # Read RGBA PNG as-is and encode to base64
+                        def read_and_encode(path: str) -> str:
                             with open(path, "rb") as f:
                                 return base64.b64encode(f.read()).decode("utf-8")
 
@@ -283,8 +285,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         })
                 except Exception as e:
                     print(f"Error fetching mask: {e}")
-                
+
     except WebSocketDisconnect:
         print("Client disconnected from Editor UI")
         ai_engine.state.request_cancel()
+
 
