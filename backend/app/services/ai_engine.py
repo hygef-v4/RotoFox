@@ -93,6 +93,7 @@ class AIEngine:
             checkpoint = checkpoints_dir / MODELS[found_model]["checkpoint"]
             model_cfg = MODELS[found_model]["config"]
             self.predictor = build_sam2_video_predictor(model_cfg, str(checkpoint), device=self.device)
+            self.predictor.add_all_frames_to_correct_as_cond = True
             self.active_model_id = found_model
             print(f"AIEngine: {MODELS[found_model]['name']} loaded successfully.")
         except Exception as e:
@@ -140,6 +141,7 @@ class AIEngine:
 
         print(f"AIEngine: Loading {info['name']} dynamically...")
         self.predictor = build_sam2_video_predictor(info["config"], str(checkpoint_path), device=self.device)
+        self.predictor.add_all_frames_to_correct_as_cond = True
         self.active_model_id = model_id
 
         SAM2_AVAILABLE = True
@@ -319,6 +321,14 @@ class AIEngine:
             for f in stale:
                 del non_cond[f]
                 cleared += 1
+
+        # Also clean frames_tracked_per_obj to keep SAM 2 tracking history synchronized
+        frames_tracked = self.inference_state.get("frames_tracked_per_obj", {})
+        for obj_idx in frames_tracked:
+            stale_tracked = [f for f in list(frames_tracked[obj_idx].keys()) if f >= start_frame]
+            for f in stale_tracked:
+                del frames_tracked[obj_idx][f]
+
         if cleared:
             print(f"AIEngine: Cleared {cleared} stale non-cond memory entries for frames >= {start_frame}")
         else:
