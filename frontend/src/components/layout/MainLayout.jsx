@@ -2,7 +2,7 @@ import React from 'react';
 
 const MainLayout = ({ toolbar, canvas, timeline }) => {
   return (
-    <div className="flex h-screen w-screen bg-gradient-to-br from-[#060608] via-[#0b0b0e] to-[#121217] overflow-hidden text-textPrimary">
+    <div className="flex h-full w-full bg-gradient-to-br from-[#060608] via-[#0b0b0e] to-[#121217] overflow-hidden text-textPrimary">
       {/* Sidebar / Toolbar (Bên trái) */}
       <div className="w-64 flex-shrink-0 bg-[#0d0d12]/60 backdrop-blur-lg border-r border-white/[0.06] flex flex-col relative z-20 overflow-y-auto shadow-2xl">
         {toolbar}
