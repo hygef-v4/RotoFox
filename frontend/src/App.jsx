@@ -6,6 +6,7 @@ import TimelineController from './components/timeline/TimelineController';
 import { useAIEngine } from './hooks/useAIEngine';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import SetupWizard from './components/setup/SetupWizard';
+import LoadingScreen from './components/layout/LoadingScreen';
 import { X, CheckCircle, AlertCircle, Download, Film, Settings, Copy, Cpu, FolderOpen } from 'lucide-react';
 
 const OBJECT_COLORS = [
@@ -170,6 +171,20 @@ function App() {
     return () => { cancelled = true; };
   }, []);
 
+  // Update setupStatus whenever the Setup Wizard is opened in-session
+  useEffect(() => {
+    if (showSetupWizard && isConnected) {
+      fetch('http://127.0.0.1:8000/api/setup-status')
+        .then(r => r.json())
+        .then(data => {
+          setSetupStatus(data);
+        })
+        .catch(err => {
+          console.error("Failed to update setup status:", err);
+        });
+    }
+  }, [showSetupWizard, isConnected]);
+
   // Global keyboard shortcuts
   useEffect(() => {
     const onKeyDown = (e) => {
@@ -317,13 +332,42 @@ function App() {
     setDeleteObjectSignal({ id, t: Date.now() });
   };
 
+  const hasModelsLoaded = systemInfo && systemInfo.models && systemInfo.models.length > 0;
+  const matanyoneModel = hasModelsLoaded && systemInfo.models.find(m => m.id === 'matanyone');
+  const samModels = hasModelsLoaded && systemInfo.models.filter(m => m.id !== 'matanyone');
+  
+  const matanyoneReady = matanyoneModel && matanyoneModel.downloaded;
+  const samReady = samModels && samModels.some(m => m.downloaded);
+  
+  const showMissingModelsBanner = isConnected && !showSetupWizard && hasModelsLoaded && (!matanyoneReady || !samReady);
+
   return (
-    <>
+    <div className="flex flex-col h-screen w-screen overflow-hidden bg-background">
       {!isConnected && (
-        <div className="absolute top-2 right-2 bg-red-500/20 border border-red-500 text-red-400 px-3 py-1 rounded text-xs z-50">
-          Disconnected from AI Core
+        <LoadingScreen isConnected={isConnected} />
+      )}
+
+      {showMissingModelsBanner && (
+        <div className="bg-red-950/80 backdrop-blur-md border-b border-red-500/20 text-red-200 px-6 py-3 text-xs flex justify-between items-center z-40 animate-fade-in flex-shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse flex-shrink-0" />
+            <div className="flex items-center gap-1.5">
+              <AlertCircle size={14} className="text-red-400" />
+              <span>
+                <strong>AI Models Missing:</strong> Local AI models are not downloaded. Rotoscoping and refinement are disabled.
+              </span>
+            </div>
+          </div>
+          <button 
+            onClick={() => setShowSetupWizard(true)}
+            className="bg-orange-500 hover:bg-orange-600 text-white font-semibold px-4 py-1.5 rounded-lg transition-colors shadow-lg shadow-orange-500/20 cursor-pointer active:scale-[0.98]"
+          >
+            Download Now
+          </button>
         </div>
       )}
+
+      <div className="flex-1 relative overflow-hidden">
 
       {/* IMPROVE-03: Tracking Complete Toast */}
       {showTrackingDoneToast && (
@@ -947,7 +991,8 @@ function App() {
           }}
         />
       )}
-    </>
+      </div>
+    </div>
   );
 }
 
