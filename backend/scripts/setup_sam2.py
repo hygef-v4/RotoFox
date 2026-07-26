@@ -1,68 +1,70 @@
+"""Clone and install the SAM 2 framework into the active environment.
+
+This script no longer downloads a checkpoint. It used to fetch SAM 2.1 Large
+(1.2 GB) before the user had been asked anything, and then ``setup_models.py``
+asked which variant they wanted — so anyone on a 4 GB GPU who sensibly chose
+Small had already spent 1.2 GB of bandwidth on a model they would never load.
+
+Weight downloads now belong solely to ``setup_models.py``, which asks first.
+"""
+
+from __future__ import annotations
+
+import argparse
 import os
 import subprocess
 import sys
-import urllib.request
 from pathlib import Path
 
-# Paths
-BASE_DIR = Path(__file__).parent.parent
-MODELS_DIR = BASE_DIR / "checkpoints"
-SAM2_REPO = "https://github.com/facebookresearch/sam2.git"
+BASE_DIR = Path(__file__).resolve().parent.parent
 SAM2_DIR = BASE_DIR / "sam2_src"
+SAM2_REPO = "https://github.com/facebookresearch/sam2.git"
 
-# Weights
-# sam2.1_hiera_large.pt
-WEIGHTS_URL = "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt"
-WEIGHTS_FILE = MODELS_DIR / "sam2.1_hiera_large.pt"
 
-def run_command(cmd, env=None):
-    print(f"Running: {cmd}")
-    result = subprocess.run(cmd, shell=True, env=env)
+def run(command: list[str], env: dict | None = None) -> None:
+    """Run a subprocess and abort the script if it fails."""
+    print(f"[RUN] {' '.join(command)}")
+    result = subprocess.run(command, env=env, check=False)
     if result.returncode != 0:
-        print(f"Error executing: {cmd}")
-        sys.exit(1)
+        sys.exit(f"[ERROR] Command failed: {' '.join(command)}")
 
-def setup_sam2():
-    print("=== SAM 2 Setup ===")
-    
-    # 1. Ensure models dir exists
-    MODELS_DIR.mkdir(exist_ok=True)
-    
-    # 2. Download weights if not exist
-    if not WEIGHTS_FILE.exists():
-        print(f"Downloading SAM 2 weights (~1.2GB) to {WEIGHTS_FILE}...")
-        try:
-            urllib.request.urlretrieve(WEIGHTS_URL, WEIGHTS_FILE)
-            print("Download complete!")
-        except Exception as e:
-            print(f"Failed to download weights: {e}")
-            sys.exit(1)
+
+def setup(skip_clone: bool = False) -> None:
+    print("=== SAM 2 setup ===")
+
+    if not SAM2_DIR.exists():
+        if skip_clone:
+            sys.exit(f"[ERROR] {SAM2_DIR} does not exist and --skip-clone was given.")
+        print(f"Cloning SAM 2 into {SAM2_DIR}...")
+        run(["git", "clone", "--depth", "1", SAM2_REPO, str(SAM2_DIR)])
     else:
-        print("SAM 2 weights already exist. Skipping download.")
+        print(f"[SKIP] SAM 2 sources already present at {SAM2_DIR}")
 
-    # 3. Check for CUDA
     try:
         import torch
+
         has_cuda = torch.cuda.is_available()
     except ImportError:
         has_cuda = False
-        
-    print(f"CUDA Available: {has_cuda}")
-    
+        print("[WARN] PyTorch is not installed yet. Install requirements.txt first "
+              "for a CUDA-enabled build.")
+
+    print(f"CUDA available: {has_cuda}")
+
     env = os.environ.copy()
     if not has_cuda:
-        print("Warning: CUDA not found. Compiling SAM 2 without CUDA extensions (will run slower on CPU).")
+        # Building the CUDA extension without a toolchain fails the whole install.
+        print("[INFO] Building SAM 2 without its CUDA extension (CPU inference will be slow).")
         env["SAM2_BUILD_CUDA"] = "0"
-    
-    # 4. Clone and Install
-    if not SAM2_DIR.exists():
-        print("Cloning SAM 2 repository...")
-        run_command(f'git clone {SAM2_REPO} "{SAM2_DIR}"')
-    
-    print("Installing SAM 2 via pip...")
-    run_command(f'"{sys.executable}" -m pip install -e "{SAM2_DIR}"', env=env)
-    
-    print("=== Setup Complete! ===")
+
+    run([sys.executable, "-m", "pip", "install", "-e", str(SAM2_DIR)], env=env)
+
+    print("\n=== SAM 2 setup complete ===")
+    print("Next: python scripts/setup_models.py    (downloads the model weights)")
+
 
 if __name__ == "__main__":
-    setup_sam2()
+    parser = argparse.ArgumentParser(description="Install the SAM 2 framework")
+    parser.add_argument("--skip-clone", action="store_true",
+                        help="Assume sam2_src already exists")
+    setup(skip_clone=parser.parse_args().skip_clone)

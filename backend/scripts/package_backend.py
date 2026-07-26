@@ -1,97 +1,120 @@
-import os
+"""Package the RotoFox backend into a standalone sidecar for Tauri.
+
+Builds from ``rotofox-backend.spec`` rather than assembling PyInstaller flags
+here. Previously this script maintained its own ``--hidden-import`` list that
+had drifted from the spec file and, critically, never passed ``--add-data`` for
+``sam2/configs`` — so the packaged backend shipped without the YAML files SAM 2
+needs and failed to build a predictor at runtime.
+
+The output is copied to the Tauri sidecar location with the platform target
+triple appended, which is the name ``tauri_plugin_shell::sidecar`` resolves.
+"""
+
+from __future__ import annotations
+
+import argparse
+import shutil
 import subprocess
 import sys
-import shutil
+import sysconfig
 from pathlib import Path
 
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = BACKEND_DIR.parent
+SPEC_FILE = BACKEND_DIR / "rotofox-backend.spec"
 
-def package():
+
+def target_triple() -> str:
+    """Return the Rust target triple for the current interpreter's platform.
+
+    Tauri looks for ``<name>-<target-triple>[.exe]`` beside the configured
+    ``externalBin`` entry.
+    """
+    platform_name = sysconfig.get_platform()
+    machine = "x86_64"
+    if "arm64" in platform_name or "aarch64" in platform_name:
+        machine = "aarch64"
+
+    if sys.platform == "win32":
+        return f"{machine}-pc-windows-msvc"
+    if sys.platform == "darwin":
+        return f"{machine}-apple-darwin"
+    return f"{machine}-unknown-linux-gnu"
+
+
+def ensure_pyinstaller() -> None:
+    """Install PyInstaller into the active environment when it is missing."""
+    try:
+        import PyInstaller  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    print("[INFO] PyInstaller is not installed. Installing it now...")
+    result = subprocess.run([sys.executable, "-m", "pip", "install", "pyinstaller"], check=False)
+    if result.returncode != 0:
+        sys.exit("[ERROR] Could not install PyInstaller.")
+
+
+def package(clean: bool = False) -> None:
+    """Run PyInstaller and stage the result for the Tauri bundler."""
     print("=== RotoFox: Backend Packaging ===")
 
-    # Check if pyinstaller is installed
-    try:
-        import PyInstaller
-    except ImportError:
-        print("[INFO] PyInstaller is not installed. Installing it now...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "pyinstaller"])
+    if not SPEC_FILE.exists():
+        sys.exit(f"[ERROR] Spec file not found: {SPEC_FILE}")
 
-    base_dir = Path(__file__).parent.parent
-    main_py = base_dir / "main.py"
+    ensure_pyinstaller()
 
-    if not main_py.exists():
-        print(f"[ERROR] main.py not found at {main_py}")
-        sys.exit(1)
+    dist_dir = BACKEND_DIR / "dist"
+    build_dir = BACKEND_DIR / "build"
 
-    # Output directories
-    dist_dir = base_dir / "dist"
-    build_dir = base_dir / "build"
-
-    # --onedir: produces a folder (dist/rotofox-backend/) instead of a single huge .exe
-    # This avoids NSIS 32-bit mmap limit (~2GB) caused by bundling PyTorch+CUDA
-    cmd = [
-        sys.executable,
-        "-m",
-        "PyInstaller",
-        "--onedir",                      # folder mode — avoids 2GB NSIS limit
-        "-y",                            # overwrite output without confirmation
-        "--name=rotofox-backend",
-        # uvicorn hidden imports
-        "--hidden-import=uvicorn.logging",
-        "--hidden-import=uvicorn.loops",
-        "--hidden-import=uvicorn.loops.auto",
-        "--hidden-import=uvicorn.protocols",
-        "--hidden-import=uvicorn.protocols.http",
-        "--hidden-import=uvicorn.protocols.http.auto",
-        "--hidden-import=uvicorn.protocols.websockets",
-        "--hidden-import=uvicorn.protocols.websockets.auto",
-        "--hidden-import=uvicorn.lifespan",
-        "--hidden-import=uvicorn.lifespan.on",
-        # websockets hidden imports
-        "--hidden-import=websockets.legacy",
-        "--hidden-import=websockets.legacy.server",
-        # output configuration
-        f"--distpath={str(dist_dir)}",
-        f"--workpath={str(build_dir)}",
-        str(main_py)
+    command = [
+        sys.executable, "-m", "PyInstaller",
+        "-y",
+        f"--distpath={dist_dir}",
+        f"--workpath={build_dir}",
+        str(SPEC_FILE),
     ]
+    if clean:
+        command.insert(3, "--clean")
 
-    print(f"Running command: {' '.join(cmd)}")
-    result = subprocess.run(cmd)
+    print(f"[INFO] Running: {' '.join(command)}")
+    # cwd matters: the spec resolves paths relative to SPECPATH.
+    result = subprocess.run(command, cwd=BACKEND_DIR, check=False)
     if result.returncode != 0:
-        print("[ERROR] PyInstaller build failed.")
-        sys.exit(1)
+        sys.exit("[ERROR] PyInstaller build failed.")
 
-    # With --onedir, output is dist/rotofox-backend/ folder
-    onedir_folder = dist_dir / "rotofox-backend"
-    exe_file = onedir_folder / "rotofox-backend.exe"
+    onedir = dist_dir / "rotofox-backend"
+    exe_name = "rotofox-backend.exe" if sys.platform == "win32" else "rotofox-backend"
+    exe_file = onedir / exe_name
 
     if not exe_file.exists():
-        print(f"[ERROR] PyInstaller build failed to generate {exe_file}")
-        sys.exit(1)
+        sys.exit(f"[ERROR] Expected executable not found: {exe_file}")
 
-    print(f"\n[OK] Successfully packaged backend folder to: {onedir_folder}")
+    print(f"[OK] Packaged backend at: {onedir}")
 
-    # Copy the entire onedir folder to frontend/src-tauri/binaries/rotofox-backend/
-    tauri_bin_dir = base_dir.parent / "frontend" / "src-tauri" / "binaries"
+    tauri_bin_dir = PROJECT_ROOT / "frontend" / "src-tauri" / "binaries"
+    tauri_bin_dir.mkdir(parents=True, exist_ok=True)
+
     sidecar_dir = tauri_bin_dir / "rotofox-backend"
-
-    # Clean old sidecar directory before copying
     if sidecar_dir.exists():
-        print(f"[INFO] Removing old sidecar directory: {sidecar_dir}")
+        print(f"[INFO] Removing previous sidecar folder: {sidecar_dir}")
         shutil.rmtree(sidecar_dir)
+    shutil.copytree(onedir, sidecar_dir)
+    print(f"[OK] Copied runtime folder to: {sidecar_dir}")
 
-    tauri_bin_dir.mkdir(exist_ok=True)
-    shutil.copytree(onedir_folder, sidecar_dir)
-    print(f"[OK] Copied sidecar backend folder to: {sidecar_dir}")
-
-    # Also place the stub launcher .exe at the expected sidecar path for Tauri:
-    # Tauri sidecar name must match: rotofox-backend-x86_64-pc-windows-msvc.exe
-    sidecar_exe = tauri_bin_dir / "rotofox-backend-x86_64-pc-windows-msvc.exe"
+    triple = target_triple()
+    suffix = ".exe" if sys.platform == "win32" else ""
+    sidecar_exe = tauri_bin_dir / f"rotofox-backend-{triple}{suffix}"
     shutil.copy2(exe_file, sidecar_exe)
-    print(f"[OK] Copied launcher EXE to sidecar path: {sidecar_exe}")
+    if sys.platform != "win32":
+        sidecar_exe.chmod(0o755)
+    print(f"[OK] Staged sidecar entry point: {sidecar_exe.name}")
 
     print("=== Backend Packaging Complete ===")
 
 
 if __name__ == "__main__":
-    package()
+    parser = argparse.ArgumentParser(description="Package the RotoFox backend")
+    parser.add_argument("--clean", action="store_true", help="Discard PyInstaller caches first")
+    package(clean=parser.parse_args().clean)

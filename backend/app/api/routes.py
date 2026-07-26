@@ -1,99 +1,187 @@
-"""HTTP REST Routes for RotoFox.
+"""HTTP REST routes for RotoFox.
 
-This module defines standard HTTP endpoints for application setup state
-and video file uploading/frame extraction.
+Covers the health check, the first-run setup status used by the wizard, and
+video upload with frame extraction.
 """
 
-import time
-from typing import Dict, Any
-from fastapi import APIRouter, UploadFile, File
-from fastapi.concurrency import run_in_threadpool
-from app.services.video_processor import VideoProcessor
-from app.services.cache_manager import CacheManager
-from app.services.model_manager import ModelManager
-from app.api.websockets import ai_engine
+from __future__ import annotations
 
+import asyncio
+import logging
+import shutil
+import time
+from typing import Any
+
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
+
+from app.api.connection import manager
+from app.core.paths import safe_suffix
+from app.core.security import get_session_token, verify_token
+from app.services.cache_manager import CacheManager
+from app.services.model_manager import TRACKING_MODEL_IDS, ModelManager
+from app.services.video_processor import VideoProcessor
+
+logger = logging.getLogger(__name__)
 router = APIRouter()
+
+ALLOWED_VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".webm", ".ogv", ".ogg", ".avi", ".mkv", ".m4v"})
+
+# Refuse absurdly large uploads rather than filling the user's disk.
+MAX_UPLOAD_BYTES = 16 * 1024 * 1024 * 1024  # 16 GB
+
+UPLOAD_CHUNK = 4 * 1024 * 1024  # 4 MB
+
+
+def _require_token(request: Request) -> None:
+    """Reject requests that do not carry the session token.
+
+    The token is supplied as ``X-RotoFox-Token`` or ``?token=``. Without it any
+    web page the user has open could POST to this local server.
+    """
+    if get_session_token() is None:
+        return
+    supplied = request.headers.get("x-rotofox-token") or request.query_params.get("token")
+    if not verify_token(supplied):
+        raise HTTPException(status_code=401, detail="Invalid or missing session token.")
 
 
 @router.get("/")
-def read_root() -> Dict[str, str]:
-    """Health check endpoint to verify backend status.
-
-    Returns:
-        dict: Status OK message.
-    """
+def read_root() -> dict[str, str]:
+    """Health check used by the frontend to detect a live backend."""
     return {"status": "ok", "message": "RotoFox AI Engine is running."}
 
 
 @router.get("/api/setup-status")
-def get_setup_status() -> Dict[str, Any]:
-    """Retrieve setup progress and hardware capabilities for the First-Run Wizard.
+def get_setup_status() -> dict[str, Any]:
+    """Report what the first-run wizard still needs to install.
 
-    Returns:
-        dict: Setup readiness indicators and profiled hardware properties.
+    A SAM 2 tracking model is **required** — without one every canvas click
+    raises and the application does nothing. MatAnyone 2 is **optional**: when
+    it is absent the exporter falls back to raw SAM 2 masks.
+
+    The original implementation had these the wrong way round. It blocked the
+    wizard until MatAnyone finished downloading while offering a "Skip for now"
+    button for SAM, so a user on a slow connection could skip the one model that
+    the app cannot run without.
     """
     info = ModelManager.get_system_info()
-    matanyone_model = next((m for m in info["models"] if m["id"] == "matanyone"), None)
-    sam_models = [m for m in info["models"] if m["id"] != "matanyone"]
-
-    matanyone_ready = matanyone_model is not None and matanyone_model["downloaded"]
-    sam_ready = any(m["downloaded"] for m in sam_models)
+    sam_ready = any(ModelManager.is_downloaded(mid) for mid in TRACKING_MODEL_IDS)
+    matanyone_ready = ModelManager.is_downloaded("matanyone")
 
     return {
-        "needs_setup": not matanyone_ready or not sam_ready,
-        "matanyone_ready": matanyone_ready,
+        "needs_setup": not sam_ready,
         "sam_ready": sam_ready,
+        "sam_required": True,
+        "matanyone_ready": matanyone_ready,
+        "matanyone_required": False,
         "recommended_sam": info["recommended_model"],
         "gpu_name": info["gpu_name"],
         "total_vram_gb": info["total_vram_gb"],
         "gpu_available": info["gpu_available"],
+        "system_ram_gb": info["system_ram_gb"],
+        "checkpoints_dir": info["checkpoints_dir"],
         "models": info["models"],
     }
 
 
 @router.post("/upload")
-async def upload_video(file: UploadFile = File(...)) -> Dict[str, Any]:
-    """Upload a video file, clear previous session cache, and extract frames.
+async def upload_video(request: Request, file: UploadFile = File(...)) -> dict[str, Any]:
+    """Store an uploaded video and extract its frames into the session cache.
 
     Args:
-        file (UploadFile): The uploaded raw video file.
+        request: Incoming request, checked for the session token.
+        file: Uploaded video.
 
     Returns:
-        dict: Success details including video metadata or error message.
+        Session metadata, or an error description.
     """
-    video_id = f"video_{int(time.time())}"
+    _require_token(request)
 
-    # Clear all previous session caches to free disk space
-    await run_in_threadpool(CacheManager.clear_all_cache)
+    from app.api.websockets import ai_engine
 
-    video_dir = CacheManager.get_video_dir(video_id)
-    video_path = video_dir / file.filename
-
-    # Save the uploaded file payload to local cache
-    with open(video_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
-
-    # Extract frames using OpenCV on a threadpool to prevent blocking the event loop
-    try:
-        frames_count, effective_fps = await run_in_threadpool(
-            VideoProcessor.extract_frames, str(video_path), video_id, 30
+    if ai_engine.state.is_busy:
+        raise HTTPException(
+            status_code=409,
+            detail="A tracking or export job is still running. Stop it before importing a new video.",
         )
 
-        # Pre-initialize video frame features in SAM 2 video predictor
-        try:
-            await run_in_threadpool(ai_engine.load_video, video_id, effective_fps)
-        except Exception as e:
-            print(f"Warning: Could not load video into SAM 2: {e}")
+    video_id = f"video_{int(time.time())}"
+    video_dir = CacheManager.get_video_dir(video_id)
 
-        return {
-            "status": "success",
-            "video_id": video_id,
-            "frames_count": frames_count,
-            "fps": effective_fps,
-            "message": "Video uploaded and frames extracted successfully."
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    # The client-supplied filename is never used to build a path. Only a
+    # whitelisted extension is taken from it, so "../../evil.bat" cannot
+    # escape the cache directory.
+    suffix = safe_suffix(file.filename or "", ALLOWED_VIDEO_SUFFIXES)
+    video_path = video_dir / f"source{suffix}"
 
+    # Stream to disk. Reading the whole upload into memory first meant a 5 GB
+    # clip needed 5 GB of RAM on a machine already hosting PyTorch.
+    written = 0
+    try:
+        with open(video_path, "wb") as handle:
+            while True:
+                chunk = await file.read(UPLOAD_CHUNK)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="This video exceeds the 16 GB limit.")
+                await run_in_threadpool(handle.write, chunk)
+    except HTTPException:
+        shutil.rmtree(video_dir, ignore_errors=True)
+        raise
+    except OSError as exc:
+        shutil.rmtree(video_dir, ignore_errors=True)
+        logger.exception("Could not save the upload: %s", exc)
+        return {"status": "error", "message": f"Could not save the uploaded file: {exc}"}
+    finally:
+        await file.close()
+
+    logger.info("Stored upload %s (%.1f MB)", video_path.name, written / 1024 ** 2)
+
+    loop = asyncio.get_running_loop()
+
+    def on_progress(done: int, total: int) -> None:
+        """Forward real extraction progress from the worker thread."""
+        asyncio.run_coroutine_threadsafe(
+            manager.send({
+                "status": "extract_progress",
+                "video_id": video_id,
+                "current": done,
+                "total": total,
+                "progress": int(done / max(total, 1) * 100),
+            }),
+            loop,
+        )
+
+    try:
+        frames_count, effective_fps = await run_in_threadpool(
+            VideoProcessor.extract_frames, str(video_path), video_id, 30, on_progress
+        )
+    except RuntimeError as exc:
+        shutil.rmtree(video_dir, ignore_errors=True)
+        logger.error("Frame extraction failed: %s", exc)
+        return {"status": "error", "message": str(exc)}
+
+    # Keep a few previous sessions instead of wiping every one on each import,
+    # so reopening an earlier clip still finds its masks.
+    await run_in_threadpool(CacheManager.prune_sessions, 3, video_id)
+
+    warning = None
+    try:
+        await run_in_threadpool(ai_engine.load_video, video_id, effective_fps)
+    except RuntimeError as exc:
+        warning = str(exc)
+        logger.warning("Video stored but SAM 2 could not initialise: %s", exc)
+
+    return {
+        "status": "success",
+        "video_id": video_id,
+        "frames_count": frames_count,
+        "fps": effective_fps,
+        "width": ai_engine.video_width,
+        "height": ai_engine.video_height,
+        "warning": warning,
+        "message": "Video uploaded and frames extracted successfully.",
+    }

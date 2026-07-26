@@ -1,4 +1,10 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+/* No webfont import here.
+ *
+ * This file previously pulled Inter from fonts.googleapis.com on every launch,
+ * which contradicted the "works fully offline, zero external requests" promise
+ * and left the UI unstyled whenever the machine was offline. The stack below
+ * uses Inter when the user already has it and otherwise falls back to the
+ * host platform's native UI font, which is what a desktop app should do. */
 
 @tailwind base;
 @tailwind components;
@@ -7,11 +13,12 @@
 @layer base {
   body {
     @apply bg-background text-textPrimary antialiased m-0 overflow-hidden;
-    font-family: 'Inter', sans-serif;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+      'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
   }
 }
 
-/* Tùy chỉnh scrollbar chuyên nghiệp */
+/* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;

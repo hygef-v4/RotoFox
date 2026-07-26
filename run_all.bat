@@ -1,26 +1,46 @@
 @echo off
-title RotoFox - 1-Click Launch Pad
+title RotoFox - Developer Launcher
 color 0E
 
+set "ROOT=%~dp0"
+
 echo ====================================================
-echo   RotoFox Developer Space - 1-Click Startup
+echo   RotoFox - Developer Launcher
 echo ====================================================
 echo.
 
-:: Launch Backend Server
-echo [INFO] Starting Backend Server in background...
-start "RotoFox Backend Core" cmd /c "cd /d "%~dp0backend" && .venv\Scripts\python main.py"
+if not exist "%ROOT%backend\.venv\Scripts\python.exe" (
+    echo [ERROR] Backend virtual environment not found.
+    echo         Run setup_and_build.bat first.
+    echo.
+    pause
+    exit /b 1
+)
 
-:: Give backend a couple of seconds to bind to port 8000
-timeout /t 2 /nobreak > nul
+if not exist "%ROOT%frontend\node_modules" (
+    echo [ERROR] Frontend dependencies not installed.
+    echo         Run "npm install" in the frontend folder, or setup_and_build.bat.
+    echo.
+    pause
+    exit /b 1
+)
 
-:: Launch Frontend Client
-echo [INFO] Starting Frontend Dev Workspace...
-start "RotoFox Frontend Workspace" cmd /c "cd /d "%~dp0frontend" && npm run dev"
+echo [INFO] Starting the backend...
+REM --no-auth: the browser dev server has no way to receive a session token,
+REM which only the packaged desktop shell can inject.
+start "RotoFox Backend" cmd /c "cd /d "%ROOT%backend" && .venv\Scripts\python.exe main.py --no-auth --reload"
+
+echo [INFO] Waiting for the backend to bind...
+timeout /t 3 /nobreak > nul
+
+echo [INFO] Starting the frontend dev server...
+start "RotoFox Frontend" cmd /c "cd /d "%ROOT%frontend" && npm run dev"
 
 echo.
-echo [OK] Both processes have been spawned in separate terminal windows.
-echo      - Backend Core running at: http://127.0.0.1:8000
-echo      - Frontend Client running at: http://localhost:1420
+echo [OK] Both processes launched in separate windows.
+echo      Backend : http://127.0.0.1:8000
+echo      Frontend: http://localhost:1420
+echo.
+echo Close those windows to stop the servers.
 echo.
 pause

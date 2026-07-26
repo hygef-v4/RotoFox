@@ -1,0 +1,106 @@
+"""Local session authentication for RotoFox.
+
+RotoFox exposes an HTTP + WebSocket server on 127.0.0.1. That port is reachable
+by *any* process on the machine, and — critically — by any web page the user has
+open, because browsers do not apply the same-origin policy to WebSocket
+connect attempts. Without authentication, a random web page could connect to
+``ws://127.0.0.1:8000/ws/editor`` while RotoFox is running and drive the whole
+backend: write exported files to arbitrary paths, open arbitrary directories,
+trigger multi-gigabyte downloads, or delete the user's masks.
+
+Mitigation is two layers:
+
+1. **Session token** — a random secret generated at startup and written to a
+   file inside the per-user runtime directory. The Tauri wrapper reads that
+   file and hands the token to the frontend. A web page cannot read it.
+2. **Origin allow-list** — browser clients always send an ``Origin`` header;
+   non-browser clients do not. Unknown origins are rejected outright.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import logging
+import secrets
+
+from app.core.paths import runtime_dir
+
+logger = logging.getLogger(__name__)
+
+TOKEN_FILE_NAME = "session.token"
+
+# Origins the desktop shell and the dev server legitimately use.
+ALLOWED_ORIGINS: frozenset[str] = frozenset(
+    {
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+        "http://localhost:1420",
+        "http://127.0.0.1:1420",
+    }
+)
+
+_session_token: str | None = None
+
+
+def generate_session_token() -> str:
+    """Create a new session token and publish it to the runtime directory.
+
+    Called once during application startup. The file is rewritten on every
+    launch so a token leaked from a previous session becomes useless.
+
+    Returns:
+        The freshly generated token.
+    """
+    global _session_token
+    _session_token = secrets.token_urlsafe(32)
+
+    token_path = runtime_dir() / TOKEN_FILE_NAME
+    try:
+        token_path.write_text(_session_token, encoding="utf-8")
+        # Best-effort permission tightening; a no-op on Windows.
+        with contextlib.suppress(OSError, NotImplementedError):
+            token_path.chmod(0o600)
+        logger.info("Session token written to %s", token_path)
+    except OSError as exc:
+        logger.error("Could not write session token: %s", exc)
+
+    return _session_token
+
+
+def get_session_token() -> str | None:
+    """Return the token for the current session, if one has been generated."""
+    return _session_token
+
+
+def verify_token(candidate: str | None) -> bool:
+    """Check a client-supplied token against the session token in constant time.
+
+    Args:
+        candidate: Token received from the client.
+
+    Returns:
+        True when the token matches. When no token has been generated (for
+        example in unit tests) authentication is disabled and this returns True.
+    """
+    if _session_token is None:
+        return True
+    if not candidate:
+        return False
+    return secrets.compare_digest(candidate, _session_token)
+
+
+def is_origin_allowed(origin: str | None) -> bool:
+    """Check whether a WebSocket ``Origin`` header is acceptable.
+
+    Args:
+        origin: Value of the ``Origin`` header, or None when absent.
+
+    Returns:
+        True when the request comes from the desktop shell, the dev server, or
+        a non-browser client (which sends no ``Origin`` at all).
+    """
+    if origin is None:
+        # Non-browser clients (the packaged shell, curl, tests) omit Origin.
+        return True
+    return origin in ALLOWED_ORIGINS

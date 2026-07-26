@@ -1,9 +1,42 @@
-fastapi
-uvicorn[standard]
-websockets
-opencv-python
-numpy
-torch
-torchvision
-ffmpeg-python
-# Note: SAM 2 and MatAnyone 2 will be installed from their respective repositories later.
+# RotoFox backend dependencies.
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# For NVIDIA GPUs, install PyTorch with CUDA FIRST, otherwise pip resolves the
+# CPU-only wheel and inference runs 20-50x slower:
+#   pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+#   pip install -r requirements.txt
+
+# ── Web server ────────────────────────────────────────────────────────────
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+websockets==13.1
+# Required by FastAPI to parse multipart form uploads. Without it every
+# POST /upload fails with "Form data requires python-multipart to be installed".
+python-multipart==0.0.20
+
+# ── Imaging ───────────────────────────────────────────────────────────────
+opencv-python==4.10.0.84
+# SAM 2 and OpenCV wheels are still built against the NumPy 1.x ABI.
+numpy==1.26.4
+# Used by ai_engine to encode mask overlays as PNG.
+pillow==11.1.0
+
+# ── Machine learning ──────────────────────────────────────────────────────
+torch==2.5.1
+torchvision==0.20.1
+
+# SAM 2 and MatAnyone 2 both load their configuration through Hydra.
+hydra-core==1.3.2
+omegaconf==2.3.0
+iopath==0.1.10
+
+# ── System ────────────────────────────────────────────────────────────────
+# Used by the Model Hub to report installed RAM.
+psutil==6.1.1
+# Optional: supplies an FFmpeg binary when one is not installed system-wide,
+# enabling ProRes 4444 and transparent WebM export.
+imageio-ffmpeg==0.5.1
+
+tqdm==4.67.1

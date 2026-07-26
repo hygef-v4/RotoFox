@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Sparkles, AlertCircle, RefreshCw } from 'lucide-react';
 
-export default function LoadingScreen({ isConnected }) {
+export default function LoadingScreen({ isConnected, error }) {
   const [statusIndex, setStatusIndex] = useState(0);
   const [secondsElapsed, setSecondsElapsed] = useState(0);
 
@@ -33,7 +33,10 @@ export default function LoadingScreen({ isConnected }) {
     window.location.reload();
   };
 
-  const isTimeout = secondsElapsed >= 30;
+  // A refusal from the backend (bad token, blocked origin, or a second editor
+  // window) is final — show it immediately instead of spinning for 30 seconds
+  // and then blaming the port.
+  const isTimeout = secondsElapsed >= 30 || !!error;
 
   return (
     <div className="fixed inset-0 flex items-center justify-center bg-gradient-to-br from-[#060608] via-[#0b0b0e] to-[#121217] text-white z-[9999] overflow-hidden select-none">
@@ -102,9 +105,12 @@ export default function LoadingScreen({ isConnected }) {
             </p>
           ) : (
             <div className="space-y-4">
-              <h3 className="text-base font-bold text-red-400">Connection Timeout</h3>
+              <h3 className="text-base font-bold text-red-400">
+                {error ? 'Connection Refused' : 'Connection Timeout'}
+              </h3>
               <p className="text-xs text-white/60 leading-relaxed max-w-xs">
-                RotoFox Core is taking longer than usual to start. This may happen if dependencies are downloading or another app is using port 8000.
+                {error
+                  || 'RotoFox Core is taking longer than usual to start. This can happen while dependencies are still downloading, or if another copy of RotoFox is already running.'}
               </p>
             </div>
           )}

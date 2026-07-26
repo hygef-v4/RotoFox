@@ -1,25 +1,37 @@
 """Memory and VRAM Management.
 
-This module provides garbage collection and CUDA cache clearing utilities
-to prevent resource exhaustion during complex segmentation tasks.
+Garbage collection and CUDA cache purging, used between heavy model swaps to
+avoid out-of-memory errors when two networks would otherwise share the GPU.
 """
 
+from __future__ import annotations
+
 import gc
+import logging
+
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryManager:
-    """Manages system memory garbage collection and GPU VRAM purging."""
+    """System memory and GPU VRAM housekeeping."""
 
     @staticmethod
     def cleanup() -> None:
-        """Collect garbage in system RAM and purge unused CUDA memory allocations."""
-        print("MemoryManager: Running garbage collection...")
+        """Collect garbage and release cached CUDA allocations."""
         gc.collect()
-
         if torch.cuda.is_available():
-            print("MemoryManager: Emptying CUDA cache...")
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        logger.debug("Memory cleanup complete")
 
-        print("MemoryManager: Cleanup finished. AI Engine is idle and ready.")
-
+    @staticmethod
+    def vram_usage_gb() -> float | None:
+        """Return currently reserved VRAM in GB, or None when running on CPU."""
+        if not torch.cuda.is_available():
+            return None
+        try:
+            return round(torch.cuda.memory_reserved() / (1024 ** 3), 2)
+        except RuntimeError:  # pragma: no cover - driver dependent
+            return None

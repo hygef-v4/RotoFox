@@ -1,38 +1,65 @@
 """AI Engine Orchestration for RotoFox.
 
-This module encapsulates the Segment Anything Model 2 (SAM 2) video predictor
-and MatAnyone 2 edge refinement pipeline, orchestrating model loading,
-point/box prompts addition, mask propagation, and transparent video export.
+Wraps the SAM 2 video predictor and the MatAnyone 2 refinement pass, and owns
+model loading, prompt handling, mask propagation and export.
+
+Two storage formats are produced for every tracked frame, because they serve
+different consumers and conflating them corrupted exports:
+
+* ``masks/{frame}.png`` — colourised RGBA overlay with alpha 150, drawn on the
+  canvas so the user can see the video through it.
+* ``alpha/{frame}.png`` — 8-bit binary matte, 0 or 255, used by the exporter.
+  Previously the exporter reused the overlay and read its alpha channel, so
+  every "Alpha Matte" export came out at 150/255 grey. Dropped into an NLE as a
+  track matte, the subject rendered at 59% opacity instead of fully opaque.
+
+``alpha/obj{id}/{frame}.png`` holds the same matte split per object, which is
+what MatAnyone needs to refine layers independently.
 """
+
+from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import io
-import os
-import shutil
+import logging
 import time
+from collections.abc import Iterator, Sequence
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Set, Tuple
+from typing import Any
+
 import cv2
 import numpy as np
 import torch
 from PIL import Image
-from fastapi import WebSocket
-from fastapi.concurrency import run_in_threadpool
 
 from app.core.engine_state import EngineState
 from app.services.cache_manager import CacheManager
+from app.services.exporters import (
+    ExportWriterError,
+    FFmpegWriter,
+    OpenCvWriter,
+    PngSequenceWriter,
+    find_ffmpeg,
+)
+from app.services.matting_engine import MatAnyoneUnavailable, MattingEngine
 from app.services.memory_manager import MemoryManager
-from app.services.model_manager import ModelManager, MODELS
+from app.services.model_manager import MODELS, ModelManager
+
+logger = logging.getLogger(__name__)
 
 try:
     from sam2.build_sam import build_sam2_video_predictor
+
     SAM2_AVAILABLE = True
-except ImportError:
+except ImportError as _exc:  # pragma: no cover - depends on installation
+    logger.error("SAM 2 is not importable: %s", _exc)
     SAM2_AVAILABLE = False
 
-# Color palette for rendering up to 7 distinct color-coded mask layers
-PALETTE: Dict[int, List[int]] = {
+# Overlay colours for up to 7 mask layers. The alpha of 150 is a *display*
+# choice; it must never reach the exporter.
+PALETTE: dict[int, list[int]] = {
     1: [255, 59, 48, 150],   # Red
     2: [0, 122, 255, 150],   # Blue
     3: [52, 199, 89, 150],   # Green
@@ -42,222 +69,275 @@ PALETTE: Dict[int, List[int]] = {
     7: [255, 204, 0, 150],   # Yellow
 }
 
+VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".webm", ".avi", ".mkv", ".m4v", ".ogv"})
+
+# Resolution used for MatAnyone inference. -1 keeps the source resolution,
+# which is the point of running a hair-level matting model at all.
+MATANYONE_MAX_SIZE = -1
+
 
 class AIEngine:
-    """Orchestrates SAM 2 and MatAnyone 2 models for video segmentation and rotoscoping."""
+    """Orchestrates SAM 2 and MatAnyone 2 for video segmentation."""
 
     def __init__(self) -> None:
         self.state: EngineState = EngineState()
-        self.predictor: Optional[Any] = None
-        self.inference_state: Optional[Any] = None
-        self.video_id: Optional[str] = None
+        self.predictor: Any | None = None
+        self.inference_state: Any | None = None
+        self.video_id: str | None = None
         self.video_width: int = 1280
         self.video_height: int = 720
         self.video_fps: float = 25.0
-        self.interaction_frames: Set[int] = set()
-        self.active_model_id: Optional[str] = None
-        self.device: torch.device = torch.device("cpu")
+        self.frame_count: int = 0
+        self.interaction_frames: set[int] = set()
+        self.tracked_objects: set[int] = set()
+        self.active_model_id: str | None = None
+        self.device: torch.device = self._select_device()
+        self.matting: MattingEngine = MattingEngine(self.device)
 
         if SAM2_AVAILABLE:
             self._init_model()
 
-    def _init_model(self) -> None:
-        """Resolve and initialize the best available SAM 2 checkpoint on CUDA, MPS, or CPU."""
+    # ── Device and precision ──────────────────────────────────────────────
+
+    @staticmethod
+    def _select_device() -> torch.device:
+        """Pick the best available compute device."""
         if torch.cuda.is_available():
-            self.device = torch.device("cuda")
-            if torch.cuda.get_device_capability()[0] >= 8:
-                torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
-        elif torch.backends.mps.is_available():
-            self.device = torch.device("mps")
+            return torch.device("cuda")
+        if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+
+    def _supports_bf16(self) -> bool:
+        """Check whether the device benefits from bfloat16 autocast."""
+        if self.device.type != "cuda":
+            return False
+        try:
+            return torch.cuda.get_device_capability()[0] >= 8
+        except (RuntimeError, AssertionError):
+            return False
+
+    @contextlib.contextmanager
+    def _amp(self) -> Iterator[None]:
+        """Enable bfloat16 autocast on capable GPUs, as a scoped context.
+
+        The previous code called ``torch.autocast(...).__enter__()`` once during
+        startup and never exited it, leaving autocast permanently enabled for
+        every tensor operation in the process — including MatAnyone's, whose
+        alpha output is precision-sensitive. It then *also* nested explicit
+        ``with torch.autocast(...)`` blocks in four places, duplicating roughly
+        sixty lines of otherwise identical code.
+        """
+        if self._supports_bf16():
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                yield
         else:
-            self.device = torch.device("cpu")
+            yield
 
-        # Automatically locate the highest priority checkpoint on disk
-        checkpoints_dir = ModelManager.get_checkpoints_dir()
-        found_model = None
+    # ── Model lifecycle ───────────────────────────────────────────────────
 
-        for model_id in ["large", "base", "small", "tiny"]:
-            info = MODELS[model_id]
-            if (checkpoints_dir / info["checkpoint"]).exists():
-                found_model = model_id
-                break
+    def _init_model(self) -> None:
+        """Load the best checkpoint present on disk, largest first."""
+        found_model = next(
+            (mid for mid in ("large", "base", "small", "tiny") if ModelManager.is_downloaded(mid)),
+            None,
+        )
 
         if not found_model:
-            print("AIEngine: WARNING: No SAM 2 checkpoints found in checkpoints/ directory.")
+            logger.warning("No SAM 2 checkpoint found in %s", ModelManager.get_checkpoints_dir())
             self.predictor = None
             self.active_model_id = None
             return
 
-        print(f"AIEngine: Loading {MODELS[found_model]['name']} on {self.device}...")
         try:
-            checkpoint = checkpoints_dir / MODELS[found_model]["checkpoint"]
-            model_cfg = MODELS[found_model]["config"]
-            self.predictor = build_sam2_video_predictor(model_cfg, str(checkpoint), device=self.device)
-            self.predictor.add_all_frames_to_correct_as_cond = True
-            self.active_model_id = found_model
-            print(f"AIEngine: {MODELS[found_model]['name']} loaded successfully.")
-        except Exception as e:
-            print(f"AIEngine: Error loading initial model {found_model}: {e}")
+            self._build_predictor(found_model)
+        except Exception as exc:
+            logger.exception("Could not load initial model %s: %s", found_model, exc)
             self.predictor = None
             self.active_model_id = None
 
-    def load_model(self, model_id: str) -> None:
-        """Unload the active SAM 2 model and dynamically load a different checkpoint.
-
-        Args:
-            model_id (str): The identifier of the model to load (e.g., 'large', 'small').
-
-        Raises:
-            RuntimeError: If the SAM 2 framework is not installed.
-            ValueError: If the model_id is invalid or refers to a refinement model.
-            FileNotFoundError: If the checkpoint file is missing from disk.
-        """
-        global SAM2_AVAILABLE
-        if not SAM2_AVAILABLE:
-            raise RuntimeError("SAM 2 framework is not installed.")
-
-        if model_id not in MODELS:
-            raise ValueError(f"Unknown model id: {model_id}")
-
-        if model_id == "matanyone":
-            raise ValueError(
-                "MatAnyone 2 is a refinement model and cannot be loaded as a tracking model. "
-                "It will be used automatically during project export."
-            )
-
-        checkpoints_dir = ModelManager.get_checkpoints_dir()
+    def _build_predictor(self, model_id: str) -> None:
+        """Construct the SAM 2 video predictor for a given model id."""
         info = MODELS[model_id]
-        checkpoint_path = checkpoints_dir / info["checkpoint"]
+        checkpoint = ModelManager.checkpoint_path(model_id)
+        logger.info("Loading %s on %s", info["name"], self.device)
 
-        if not checkpoint_path.exists():
-            raise FileNotFoundError(f"Checkpoint file {info['checkpoint']} does not exist. Please download it first.")
-
-        print("AIEngine: Unloading model and clearing RAM/VRAM cache...")
-        self.predictor = None
-        if self.inference_state is not None:
-            del self.inference_state
-            self.inference_state = None
-        MemoryManager.cleanup()
-
-        print(f"AIEngine: Loading {info['name']} dynamically...")
-        self.predictor = build_sam2_video_predictor(info["config"], str(checkpoint_path), device=self.device)
+        self.predictor = build_sam2_video_predictor(
+            info["config"], str(checkpoint), device=self.device
+        )
+        # A frame that receives a correction click becomes a conditioning frame,
+        # so later corrections actually influence propagation.
         self.predictor.add_all_frames_to_correct_as_cond = True
         self.active_model_id = model_id
+        logger.info("%s loaded successfully", info["name"])
 
-        SAM2_AVAILABLE = True
-        print(f"AIEngine: Dynamic load of {info['name']} complete.")
-
-    def load_video(self, video_id: str, fps: float = 25.0) -> None:
-        """Initialize the SAM 2 inference state for a newly uploaded video cache.
+    def load_model(self, model_id: str) -> None:
+        """Swap the active tracking model, freeing the previous one first.
 
         Args:
-            video_id (str): Unique identifier of the cached video session.
-            fps (float, optional): The effective FPS of the video. Defaults to 25.0.
+            model_id: Identifier of the model to activate.
 
         Raises:
-            RuntimeError: If SAM 2 model is not loaded or cache frames are missing.
+            RuntimeError: If SAM 2 is not installed.
+            ValueError: If the id is unknown or refers to the refinement model.
+            FileNotFoundError: If the checkpoint is missing or truncated.
+        """
+        if not SAM2_AVAILABLE:
+            raise RuntimeError(
+                "The SAM 2 framework is not installed. Run "
+                "'python scripts/setup_sam2.py' in the backend folder."
+            )
+        if model_id not in MODELS:
+            raise ValueError(f"Unknown model id: {model_id}")
+        if model_id == "matanyone":
+            raise ValueError(
+                "MatAnyone 2 is a refinement model and cannot be used for tracking. "
+                "It runs automatically during export when its checkpoint is present."
+            )
+        if not ModelManager.is_downloaded(model_id):
+            raise FileNotFoundError(
+                f"The checkpoint for {MODELS[model_id]['name']} is missing or incomplete. "
+                "Download it from the Model Hub first."
+            )
+
+        logger.info("Unloading current model to free RAM/VRAM")
+        self.predictor = None
+        self.inference_state = None
+        MemoryManager.cleanup()
+
+        self._build_predictor(model_id)
+
+    def load_video(self, video_id: str, fps: float | None = None) -> None:
+        """Initialise SAM 2 inference state for a cached video session.
+
+        Args:
+            video_id: Session identifier.
+            fps: Effective frame rate after extraction. Retained when omitted.
+
+        Raises:
+            RuntimeError: If no model is loaded or the frame cache is empty.
         """
         if not SAM2_AVAILABLE or self.predictor is None:
-            raise RuntimeError("SAM 2 model is not loaded. Please download/activate a model in the Model Hub.")
+            raise RuntimeError(
+                "No SAM 2 model is active. Download and activate one in the Model Hub."
+            )
 
         video_dir = CacheManager.get_video_dir(video_id)
-        frames = list(video_dir.glob("*.jpg"))
-        if not video_dir.exists() or len(frames) == 0:
-            raise RuntimeError("Video frames not extracted.")
+        frames = sorted(video_dir.glob("*.jpg"))
+        if not frames:
+            raise RuntimeError(
+                "No extracted frames were found for this video. Please import it again."
+            )
 
-        # Read dimensions of the first frame to scale normalized canvas coordinates
-        first_frame = sorted(frames)[0]
         try:
-            with Image.open(first_frame) as img:
+            with Image.open(frames[0]) as img:
                 self.video_width, self.video_height = img.size
-            print(f"AIEngine: Loaded video dimensions: {self.video_width}x{self.video_height}")
-        except Exception as e:
-            print(f"Warning: Could not read video dimensions from first frame: {e}. Defaulting to 1280x720")
+        except (OSError, ValueError) as exc:
+            logger.warning("Could not read frame dimensions (%s); assuming 1280x720", exc)
             self.video_width, self.video_height = 1280, 720
 
-        self.video_fps = fps if fps and fps > 0 else 25.0
-        print(f"AIEngine: Video FPS stored as {self.video_fps}")
+        self.frame_count = len(frames)
+        if fps and fps > 0:
+            self.video_fps = fps
 
         self.interaction_frames = set()
+        self.tracked_objects = set()
 
-        print(f"AIEngine: Initializing state for video {video_id}")
-
-        # Free previous VRAM allocations before loading a new state
+        # Release the previous state before allocating a new one, or peak VRAM
+        # briefly holds two full videos' worth of image features.
         if self.inference_state is not None:
-            print("AIEngine: Clearing previous inference state to free VRAM.")
-            del self.inference_state
             self.inference_state = None
-            if hasattr(self, 'device') and self.device.type == "cuda":
-                torch.cuda.empty_cache()
+            MemoryManager.cleanup()
 
-        if hasattr(self, 'device') and self.device.type == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                self.inference_state = self.predictor.init_state(video_path=str(video_dir))
-                self.predictor.reset_state(self.inference_state)
-        else:
+        logger.info(
+            "Initialising SAM 2 state for %s (%d frames, %dx%d, %.2f fps)",
+            video_id, self.frame_count, self.video_width, self.video_height, self.video_fps,
+        )
+
+        with self._amp():
             self.inference_state = self.predictor.init_state(video_path=str(video_dir))
             self.predictor.reset_state(self.inference_state)
+
         self.video_id = video_id
+
+    def reload_after_export(self) -> None:
+        """Restore the tracking model and video state after an export.
+
+        Export unloads SAM 2 so MatAnyone can have the GPU to itself. Without
+        this call the engine stayed unloaded: the next canvas click raised
+        "No video loaded into AI engine" and the only way back was to reactivate
+        a model from the Model Hub — which no user would guess.
+        """
+        if self.active_model_id is None:
+            return
+        try:
+            if self.predictor is None:
+                self._build_predictor(self.active_model_id)
+            if self.video_id and self.inference_state is None:
+                self.load_video(self.video_id, self.video_fps)
+                logger.info("Engine restored after export")
+        except Exception as exc:
+            logger.exception("Could not restore the engine after export: %s", exc)
+
+    # ── Prompting ─────────────────────────────────────────────────────────
 
     def add_point_or_box(
         self,
         frame_idx: int,
         obj_id: int,
-        points: Optional[List[List[float]]],
-        labels: Optional[List[int]],
-        box: Optional[List[float]],
-        width: int,
-        height: int
-    ) -> Optional[str]:
-        """Add positive/negative point prompts or box annotations on a frame and predict masks.
+        points: Sequence[Sequence[float]] | None,
+        labels: Sequence[int] | None,
+        box: Sequence[float] | None,
+    ) -> str | None:
+        """Add point or box prompts to a frame and return the predicted overlay.
 
         Args:
-            frame_idx (int): The current frame index.
-            obj_id (int): Identifier of the mask object layer.
-            points (list, optional): List of normalized [X, Y] click coordinates.
-            labels (list, optional): List of click labels (1: Include, 0: Exclude).
-            box (list, optional): Bounding box coordinates [X1, Y1, X2, Y2].
-            width (int): Current Canvas width.
-            height (int): Current Canvas height.
-
-        Raises:
-            RuntimeError: If no video inference state is loaded.
-            ValueError: If neither points nor boxes are provided.
+            frame_idx: Timeline index of the frame being annotated.
+            obj_id: Mask layer identifier.
+            points: Normalised ``[x, y]`` pairs in the range 0..1.
+            labels: 1 for include, 0 for exclude. Must match ``points``.
+            box: Normalised ``[x1, y1, x2, y2]``.
 
         Returns:
-            str, optional: Base64-encoded RGBA PNG representing the predicted overlay.
+            Base64 PNG of the colourised overlay, or None when nothing was predicted.
+
+        Raises:
+            RuntimeError: If no video is loaded.
+            ValueError: If neither points nor a box were supplied, or the
+                point and label counts disagree.
         """
-        print(f"AIEngine: add_point_or_box. Frame: {frame_idx}, Obj: {obj_id}")
         if not self.inference_state:
-            raise RuntimeError("No video loaded into AI engine.")
+            raise RuntimeError("No video is loaded into the AI engine.")
 
-        # Log frame interactions to help track_forward calculate correction propagation ranges
-        self.interaction_frames.add(frame_idx)
+        abs_points = abs_labels = abs_box = None
 
-        abs_points, abs_labels, abs_box = None, None, None
-
-        if points and labels and len(points) > 0:
-            abs_points = np.array([[p[0] * width, p[1] * height] for p in points], dtype=np.float32)
-            abs_labels = np.array(labels, np.int32)
+        if points:
+            if labels is None or len(labels) != len(points):
+                raise ValueError("Each point needs exactly one label.")
+            abs_points = np.array(
+                [[p[0] * self.video_width, p[1] * self.video_height] for p in points],
+                dtype=np.float32,
+            )
+            abs_labels = np.array(labels, dtype=np.int32)
 
         if box and len(box) == 4:
-            abs_box = np.array([box[0] * width, box[1] * height, box[2] * width, box[3] * height], dtype=np.float32)
+            abs_box = np.array(
+                [
+                    box[0] * self.video_width,
+                    box[1] * self.video_height,
+                    box[2] * self.video_width,
+                    box[3] * self.video_height,
+                ],
+                dtype=np.float32,
+            )
 
         if abs_points is None and abs_box is None:
-            raise ValueError("No valid points or box provided")
+            raise ValueError("No valid points or box were provided.")
 
-        if hasattr(self, 'device') and self.device.type == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
-                    inference_state=self.inference_state,
-                    frame_idx=frame_idx,
-                    obj_id=obj_id,
-                    points=abs_points,
-                    labels=abs_labels,
-                    box=abs_box,
-                    clear_old_points=True
-                )
-        else:
+        self.interaction_frames.add(frame_idx)
+        self.tracked_objects.add(obj_id)
+
+        with self._amp():
             _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
                 inference_state=self.inference_state,
                 frame_idx=frame_idx,
@@ -265,395 +345,656 @@ class AIEngine:
                 points=abs_points,
                 labels=abs_labels,
                 box=abs_box,
-                clear_old_points=True
+                clear_old_points=True,
             )
 
-        return self._masks_to_base64(out_obj_ids, out_mask_logits, self.video_width, self.video_height)
+        overlay, _, _ = self._render_masks(out_obj_ids, out_mask_logits)
+        return overlay
 
-    def _masks_to_base64(self, out_obj_ids: List[int], out_mask_logits: Any, width: int, height: int) -> Optional[str]:
-        """Convert predicted torch mask logits into a colorized RGBA Base64 string.
+    def remove_object(self, obj_id: int, frame_idx: int | None = None) -> tuple[str | None, list[int]]:
+        """Remove a mask layer and return the refreshed overlay for a frame.
 
         Args:
-            out_obj_ids (list): Predicted object IDs.
-            out_mask_logits (Tensor): Predicted raw logits.
-            width (int): Canvas target width.
-            height (int): Canvas target height.
+            obj_id: Layer to remove.
+            frame_idx: Frame whose overlay should be returned.
 
         Returns:
-            str, optional: Base64-encoded overlay image string.
+            ``(overlay_base64_or_None, remaining_object_ids)``. The overlay is
+            None when the frame has no masks left, which the caller must
+            forward so the canvas clears itself.
         """
-        if len(out_obj_ids) == 0:
-            return None
+        if not self.inference_state or self.predictor is None:
+            return None, []
 
-        # Convert logits into a binary mask
-        mask_np = (out_mask_logits[0] > 0.0).cpu().numpy().squeeze()
-        h, w = mask_np.shape
-        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        try:
+            remaining_ids, updated_frames = self.predictor.remove_object(
+                self.inference_state, obj_id
+            )
+        except Exception as exc:
+            logger.exception("Could not remove object %s: %s", obj_id, exc)
+            return None, sorted(self.tracked_objects)
 
-        # Loop through objects and apply color overlays based on their IDs
-        for idx, obj_id in enumerate(out_obj_ids):
-            mask = (out_mask_logits[idx] > 0.0).cpu().numpy().squeeze()
-            color_key = ((obj_id - 1) % 7) + 1
-            color = PALETTE.get(color_key, [255, 255, 255, 150])
-            rgba[mask] = color
+        self.tracked_objects.discard(obj_id)
+        logger.info("Removed object %s; %s remaining", obj_id, list(remaining_ids))
 
-        img = Image.fromarray(rgba, 'RGBA')
-        buf = io.BytesIO()
-        img.save(buf, format='PNG')
-        return base64.b64encode(buf.getvalue()).decode('utf-8')
+        self._delete_object_alpha(obj_id)
+
+        # SAM 2 returns a *list* of (frame_idx, masks) tuples. The original code
+        # tested `isinstance(updated_frames, dict)`, which is never true, so this
+        # method always returned None and the canvas kept showing the deleted
+        # object until the user navigated away.
+        if frame_idx is not None:
+            for updated_idx, masks in updated_frames or []:
+                if updated_idx == frame_idx:
+                    overlay, _, _ = self._render_masks(list(remaining_ids), masks)
+                    return overlay, list(remaining_ids)
+
+        # Removing the final object clears the whole state and yields an empty
+        # list; the caller still needs to be told to wipe the overlay.
+        return None, list(remaining_ids)
+
+    def clear_all_prompts(self) -> None:
+        """Reset SAM 2 state and delete every generated mask for this video."""
+        if self.inference_state is not None and self.predictor is not None:
+            self.predictor.reset_state(self.inference_state)
+        if self.video_id:
+            CacheManager.clear_masks(self.video_id)
+        self.interaction_frames.clear()
+        self.tracked_objects.clear()
+        logger.info("Cleared prompts and masks for %s", self.video_id)
+
+    # ── Mask rendering and persistence ────────────────────────────────────
+
+    def _render_masks(
+        self, out_obj_ids: Sequence[int], out_mask_logits: Any
+    ) -> tuple[str | None, np.ndarray | None, dict[int, np.ndarray]]:
+        """Convert SAM 2 logits into an overlay, a combined matte and per-object mattes.
+
+        Args:
+            out_obj_ids: Object ids matching the first axis of the logits.
+            out_mask_logits: Tensor of raw logits.
+
+        Returns:
+            ``(overlay_base64, combined_alpha, {obj_id: alpha})``. All three are
+            empty when there are no objects.
+        """
+        if out_obj_ids is None or len(out_obj_ids) == 0:
+            return None, None, {}
+
+        # One device-to-host transfer for the whole batch. The original code
+        # converted object 0 twice: once just to read its shape.
+        binary = (out_mask_logits > 0.0).detach().cpu().numpy()
+        binary = binary.reshape(len(out_obj_ids), *binary.shape[-2:])
+
+        height, width = binary.shape[-2:]
+        rgba = np.zeros((height, width, 4), dtype=np.uint8)
+        combined = np.zeros((height, width), dtype=np.uint8)
+        per_object: dict[int, np.ndarray] = {}
+
+        for index, obj_id in enumerate(out_obj_ids):
+            mask = binary[index]
+            colour = PALETTE.get(((int(obj_id) - 1) % 7) + 1, [255, 255, 255, 150])
+            rgba[mask] = colour
+
+            alpha = np.zeros((height, width), dtype=np.uint8)
+            alpha[mask] = 255
+            per_object[int(obj_id)] = alpha
+            combined[mask] = 255
+
+        buffer = io.BytesIO()
+        Image.fromarray(rgba, "RGBA").save(buffer, format="PNG", optimize=False)
+        overlay_b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+        return overlay_b64, combined, per_object
+
+    def _persist_masks(
+        self,
+        frame_idx: int,
+        overlay_b64: str | None,
+        combined: np.ndarray | None,
+        per_object: dict[int, np.ndarray],
+    ) -> None:
+        """Write the overlay and mattes for one frame to the session cache."""
+        if not self.video_id or overlay_b64 is None or combined is None:
+            return
+
+        mask_dir = CacheManager.get_mask_dir(self.video_id)
+        alpha_dir = CacheManager.get_alpha_dir(self.video_id)
+
+        with open(mask_dir / f"{frame_idx:05d}.png", "wb") as handle:
+            handle.write(base64.b64decode(overlay_b64))
+
+        cv2.imwrite(str(alpha_dir / f"{frame_idx:05d}.png"), combined)
+
+        for obj_id, alpha in per_object.items():
+            obj_dir = alpha_dir / f"obj{obj_id}"
+            obj_dir.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(obj_dir / f"{frame_idx:05d}.png"), alpha)
+
+    def _delete_object_alpha(self, obj_id: int) -> None:
+        """Delete the per-object matte directory for a removed layer."""
+        if not self.video_id:
+            return
+        import shutil
+
+        obj_dir = CacheManager.get_alpha_dir(self.video_id) / f"obj{obj_id}"
+        if obj_dir.exists():
+            shutil.rmtree(obj_dir, ignore_errors=True)
 
     def _clear_stale_non_cond_memory(self, start_frame: int) -> None:
-        """Clear SAM2 non-conditioning cached features for all frames >= start_frame.
+        """Drop cached non-conditioning outputs at or after a frame.
 
-        This forces the propagation algorithm to re-calculate features using the updated
-        user annotations (conditioning inputs) instead of reusing stale tracking cache.
-
-        Args:
-            start_frame (int): The boundary frame index from which to purge the cache.
+        Forces propagation to recompute those frames from the user's updated
+        annotations rather than reusing tracking results from before the edit.
         """
         if not self.inference_state:
             return
-        output_dict_per_obj = self.inference_state.get("output_dict_per_obj", {})
+
         cleared = 0
-        for obj_idx in output_dict_per_obj:
-            non_cond = output_dict_per_obj[obj_idx]["non_cond_frame_outputs"]
-            stale = [f for f in list(non_cond.keys()) if f >= start_frame]
-            for f in stale:
-                del non_cond[f]
+        for obj_state in self.inference_state.get("output_dict_per_obj", {}).values():
+            non_cond = obj_state.get("non_cond_frame_outputs", {})
+            for frame in [f for f in list(non_cond) if f >= start_frame]:
+                del non_cond[frame]
                 cleared += 1
 
-        # Also clean frames_tracked_per_obj to keep SAM 2 tracking history synchronized
-        frames_tracked = self.inference_state.get("frames_tracked_per_obj", {})
-        for obj_idx in frames_tracked:
-            stale_tracked = [f for f in list(frames_tracked[obj_idx].keys()) if f >= start_frame]
-            for f in stale_tracked:
-                del frames_tracked[obj_idx][f]
+        for tracked in self.inference_state.get("frames_tracked_per_obj", {}).values():
+            for frame in [f for f in list(tracked) if f >= start_frame]:
+                del tracked[frame]
 
-        if cleared:
-            print(f"AIEngine: Cleared {cleared} stale non-cond memory entries for frames >= {start_frame}")
-        else:
-            print(f"AIEngine: No stale non-cond memory to clear for frames >= {start_frame}")
+        logger.info("Cleared %d stale memory entries from frame %d", cleared, start_frame)
 
-    async def run_propagation(self, websocket: WebSocket, start_frame: Optional[int] = None) -> None:
-        """Run SAM 2 video mask propagation and stream predictions to the client.
+    # ── Propagation ───────────────────────────────────────────────────────
+
+    async def run_propagation(
+        self,
+        send_json,
+        start_frame: int | None = None,
+        reverse: bool = False,
+    ) -> None:
+        """Propagate masks across the timeline, streaming results to the client.
+
+        The SAM 2 generator is a synchronous, GPU-bound loop. It used to run
+        directly on the asyncio event loop with a 1 ms sleep between frames,
+        which meant every other WebSocket message — including ``cancel_tracking``
+        — waited behind 50-200 ms of GPU work per frame. Here the generator runs
+        on a worker thread and results arrive through a bounded queue, so the
+        Stop button responds immediately and disk writes stay off the event loop.
 
         Args:
-            websocket (WebSocket): The active client WebSocket connection.
-            start_frame (int, optional): The frame index from which to begin propagation.
+            send_json: Coroutine accepting one dict, used to reach the client.
+            start_frame: Frame to start from. Defaults to the earliest annotation.
+            reverse: Track backwards through the timeline instead of forwards.
         """
         if not self.state.is_tracking or not self.inference_state:
-            print("AI Engine: Cannot start propagation - not tracking or no inference state")
+            logger.warning("Propagation requested while not tracking or with no state")
             return
 
-        # Purge stale memory slots to force propagation recalculations based on fresh annotations
-        if start_frame is not None and start_frame > 0:
+        if start_frame is not None and start_frame > 0 and not reverse:
             self._clear_stale_non_cond_memory(start_frame)
 
-        print(f"AI Engine: Starting propagation from frame {start_frame}...")
-        video_dir = CacheManager.get_video_dir(self.video_id)
-        mask_dir = video_dir / "masks"
-        mask_dir.mkdir(exist_ok=True)
+        logger.info(
+            "Starting propagation from frame %s (%s)",
+            start_frame, "backward" if reverse else "forward",
+        )
+
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=32)
+        SENTINEL = object()
+
+        def publish(item) -> None:
+            """Hand an item to the event loop, blocking when the queue is full."""
+            asyncio.run_coroutine_threadsafe(queue.put(item), loop).result()
+
+        def worker() -> None:
+            try:
+                with self._amp():
+                    generator = self.predictor.propagate_in_video(
+                        self.inference_state,
+                        start_frame_idx=start_frame,
+                        reverse=reverse,
+                    )
+                    for frame_idx, obj_ids, mask_logits in generator:
+                        if self.state.cancel_requested:
+                            publish(("cancelled", frame_idx))
+                            return
+                        overlay, combined, per_object = self._render_masks(obj_ids, mask_logits)
+                        self._persist_masks(frame_idx, overlay, combined, per_object)
+                        publish(("frame", frame_idx, [int(o) for o in obj_ids], overlay))
+                publish(("completed", None))
+            except BaseException as exc:  # noqa: BLE001 - forwarded to the client
+                logger.exception("Propagation failed: %s", exc)
+                publish(("error", exc))
+            finally:
+                asyncio.run_coroutine_threadsafe(queue.put(SENTINEL), loop)
+
+        task = loop.run_in_executor(None, worker)
 
         try:
-            completed = False
+            while True:
+                item = await queue.get()
+                if item is SENTINEL:
+                    break
 
-            if hasattr(self, 'device') and self.device.type == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
-                with torch.autocast("cuda", dtype=torch.bfloat16):
-                    generator = self.predictor.propagate_in_video(self.inference_state, start_frame_idx=start_frame)
-
-                    for out_frame_idx, out_obj_ids, out_mask_logits in generator:
-                        if self.state.cancel_requested:
-                            print(f"AI Engine: Propagation cancelled at frame {out_frame_idx}")
-                            await websocket.send_json({"status": "cancelled", "frame": out_frame_idx})
-                            break
-
-                        b64_mask = self._masks_to_base64(
-                            out_obj_ids, out_mask_logits, self.video_width, self.video_height
-                        )
-
-                        if b64_mask:
-                            mask_filename = f"{out_frame_idx:05d}.png"
-                            img_bytes = base64.b64decode(b64_mask)
-                            with open(mask_dir / mask_filename, "wb") as f:
-                                f.write(img_bytes)
-
-                        self.state.current_frame = out_frame_idx
-                        progress = int((out_frame_idx / max(self.state.total_frames, 1)) * 100)
-
-                        await websocket.send_json({
-                            "status": "tracking",
-                            "frame": out_frame_idx,
-                            "progress": progress,
-                            "mask_base64": b64_mask
-                        })
-                        await asyncio.sleep(0.001)
-                    else:
-                        completed = True
-            else:
-                generator = self.predictor.propagate_in_video(self.inference_state, start_frame_idx=start_frame)
-
-                for out_frame_idx, out_obj_ids, out_mask_logits in generator:
-                    if self.state.cancel_requested:
-                        print(f"AI Engine: Propagation cancelled at frame {out_frame_idx}")
-                        await websocket.send_json({"status": "cancelled", "frame": out_frame_idx})
-                        break
-
-                    b64_mask = self._masks_to_base64(
-                        out_obj_ids, out_mask_logits, self.video_width, self.video_height
-                    )
-
-                    if b64_mask:
-                        mask_filename = f"{out_frame_idx:05d}.png"
-                        img_bytes = base64.b64decode(b64_mask)
-                        with open(mask_dir / mask_filename, "wb") as f:
-                            f.write(img_bytes)
-
-                    self.state.current_frame = out_frame_idx
-                    progress = int((out_frame_idx / max(self.state.total_frames, 1)) * 100)
-
-                    await websocket.send_json({
+                kind = item[0]
+                if kind == "frame":
+                    _, frame_idx, obj_ids, overlay = item
+                    self.state.current_frame = frame_idx
+                    total = max(self.state.total_frames, 1)
+                    await send_json({
                         "status": "tracking",
-                        "frame": out_frame_idx,
-                        "progress": progress,
-                        "mask_base64": b64_mask
+                        "frame": frame_idx,
+                        "obj_ids": obj_ids,
+                        "progress": min(100, int((frame_idx + 1) / total * 100)),
+                        "mask_base64": overlay,
                     })
-                    await asyncio.sleep(0.001)
-                else:
-                    completed = True
-
-            if completed:
-                print("AI Engine: Propagation completed successfully.")
-                await websocket.send_json({"status": "completed"})
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print(f"AI Engine Error: {e}")
-            await websocket.send_json({"status": "error", "message": str(e)})
+                elif kind == "cancelled":
+                    await send_json({"status": "cancelled", "frame": item[1]})
+                elif kind == "completed":
+                    await send_json({"status": "completed"})
+                elif kind == "error":
+                    await send_json({"status": "error", "message": str(item[1])})
         finally:
-            self.state.is_tracking = False
-            await run_in_threadpool(MemoryManager.cleanup)
+            await task
+            self.state.finish_tracking()
+            MemoryManager.cleanup()
 
-    def remove_object(self, obj_id: int, frame_idx: Optional[int] = None) -> Optional[str]:
-        """Remove a designated object from tracking history.
+    # ── Export ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _read_matte(path: Path, target_shape: tuple[int, int]) -> np.ndarray | None:
+        """Read an alpha matte of any channel layout and fit it to a frame.
+
+        MatAnyone writes single-channel PNGs while SAM 2 overlays are RGBA. The
+        original exporter assumed the RGBA layout and called
+        ``cv2.cvtColor(m, COLOR_BGR2GRAY)`` on anything else, which raises
+        "Source image must have 3 or 4 channels" on a 2-D array. Sizes are also
+        normalised here rather than only inside the resolution-change branch,
+        so a downscaled matte can never be silently composited against a
+        full-size frame.
 
         Args:
-            obj_id (int): ID of the object to delete.
-            frame_idx (int, optional): Current frame index.
+            path: Matte file to read.
+            target_shape: ``(height, width)`` of the frame it accompanies.
 
         Returns:
-            str, optional: Updated base64 overlay of the current frame.
+            An 8-bit single-channel matte, or None when the file is missing.
         """
-        if not self.inference_state:
+        if not path.exists():
             return None
+
+        raw = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        if raw is None:
+            return None
+
+        if raw.ndim == 2:
+            matte = raw
+        elif raw.shape[2] == 4:
+            matte = raw[:, :, 3]
+        elif raw.shape[2] == 3:
+            matte = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
+        else:
+            matte = raw[:, :, 0]
+
+        if matte.dtype != np.uint8:
+            matte = cv2.normalize(matte, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+        if matte.shape[:2] != target_shape:
+            matte = cv2.resize(
+                matte, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_LINEAR
+            )
+        return matte
+
+    def _build_writer(
+        self,
+        export_format: str,
+        export_type: str,
+        output_dir: Path,
+        stem: str,
+        width: int,
+        height: int,
+        fps: float,
+    ):
+        """Choose and construct an output writer for the requested format.
+
+        Returns:
+            ``(writer, needs_alpha)``.
+
+        Raises:
+            ExportWriterError: If the format cannot be produced on this machine.
+        """
+        wants_alpha = export_type == "transparent"
+        ffmpeg = find_ffmpeg()
+
+        if export_format == "png":
+            target = output_dir / stem
+            return PngSequenceWriter(target, matte_only=(export_type == "alpha")), wants_alpha
+
+        if export_format == "mov":
+            if not ffmpeg:
+                raise ExportWriterError(
+                    "ProRes 4444 (.mov) requires FFmpeg, which was not found. "
+                    "Install FFmpeg and add it to PATH, place ffmpeg.exe next to "
+                    "RotoFox.exe, or export as PNG Sequence instead."
+                )
+            return (
+                FFmpegWriter(ffmpeg, output_dir / f"{stem}.mov", width, height, fps,
+                             with_alpha=wants_alpha, codec="prores"),
+                wants_alpha,
+            )
+
+        if export_format == "webm":
+            if ffmpeg:
+                return (
+                    FFmpegWriter(ffmpeg, output_dir / f"{stem}.webm", width, height, fps,
+                                 with_alpha=wants_alpha, codec="vp9"),
+                    wants_alpha,
+                )
+            if wants_alpha:
+                raise ExportWriterError(
+                    "Transparent WebM requires FFmpeg, which was not found. "
+                    "Export as PNG Sequence instead."
+                )
+            return OpenCvWriter(output_dir / f"{stem}.webm", width, height, fps, "vp80"), False
+
+        # Default: MP4, which cannot carry alpha in any widely supported codec.
+        if wants_alpha:
+            raise ExportWriterError(
+                "MP4 cannot store transparency. Choose MOV (ProRes 4444), "
+                "WebM, or PNG Sequence for a transparent export."
+            )
+        if ffmpeg:
+            return (
+                FFmpegWriter(ffmpeg, output_dir / f"{stem}.mp4", width, height, fps,
+                             with_alpha=False, codec="h264"),
+                False,
+            )
+        return OpenCvWriter(output_dir / f"{stem}.mp4", width, height, fps, "mp4v"), False
+
+    async def _refine_with_matanyone(self, send_json, video_dir: Path) -> Path | None:
+        """Run MatAnyone 2 over every tracked object and merge the results.
+
+        Returns:
+            Directory of merged refined mattes, or None when refinement was not
+            possible. Failures are reported to the client instead of being
+            swallowed: the previous code caught every exception and quietly fell
+            back to raw masks, which is why a Hydra initialisation error made
+            MatAnyone appear to work while doing nothing at all.
+        """
+        checkpoint = ModelManager.checkpoint_path("matanyone")
+        if not ModelManager.is_downloaded("matanyone"):
+            return None
+        if not MattingEngine.is_available():
+            logger.warning("MatAnyone checkpoint present but its source tree is missing")
+            return None
+
+        alpha_dir = CacheManager.get_alpha_dir(self.video_id)
+        object_dirs = sorted(
+            (p for p in alpha_dir.iterdir() if p.is_dir() and p.name.startswith("obj")),
+            key=lambda p: p.name,
+        )
+        if not object_dirs:
+            return None
+
+        frames = sorted(video_dir.glob("*.jpg"))
+        if not frames:
+            return None
+
+        refined_root = video_dir / "refined"
+        merged_dir = refined_root / "merged"
+        merged_dir.mkdir(parents=True, exist_ok=True)
+
+        await send_json({
+            "status": "export_progress",
+            "progress": 0,
+            "message": "Loading MatAnyone 2 for edge refinement...",
+        })
+
+        # Free the tracking model so both networks never share VRAM.
+        self.predictor = None
+        self.inference_state = None
+        MemoryManager.cleanup()
+
         try:
-            _, updated_frames = self.predictor.remove_object(self.inference_state, obj_id)
-            print(f"AIEngine: Object {obj_id} removed.")
-
-            if frame_idx is not None and isinstance(updated_frames, dict) and frame_idx in updated_frames:
-                out_obj_ids, out_mask_logits = updated_frames[frame_idx]
-                return self._masks_to_base64(out_obj_ids, out_mask_logits, self.video_width, self.video_height)
-            return None
-        except Exception as e:
-            print(f"AIEngine: Error removing object {obj_id}: {e}")
+            await asyncio.to_thread(self.matting.load, checkpoint)
+        except MatAnyoneUnavailable as exc:
+            logger.error("MatAnyone 2 unavailable: %s", exc)
+            await send_json({
+                "status": "export_warning",
+                "message": f"Edge refinement skipped: {exc}. Exporting with SAM 2 masks.",
+            })
             return None
 
-    async def run_export(self, websocket: WebSocket, settings: Dict[str, Any]) -> None:
-        """Composite mask overlays onto frames and render the final transparent output video.
+        loop = asyncio.get_running_loop()
+
+        try:
+            per_object_dirs: list[Path] = []
+
+            for position, obj_dir in enumerate(object_dirs, start=1):
+                mattes = sorted(obj_dir.glob("*.png"))
+                if not mattes:
+                    continue
+
+                seed_index = int(mattes[0].stem)
+                seed = cv2.imread(str(mattes[0]), cv2.IMREAD_GRAYSCALE)
+                if seed is None:
+                    continue
+
+                # Refine from the first annotated frame onwards. Seeding frame 0
+                # with a mask that belongs to frame 200 produced nonsense.
+                sequence = [f for f in frames if int(f.stem) >= seed_index]
+                if not sequence:
+                    continue
+
+                out_dir = refined_root / obj_dir.name
+                label = f"object {position}/{len(object_dirs)}"
+
+                async def report(done: int, total: int, _label=label) -> None:
+                    await send_json({
+                        "status": "export_progress",
+                        "progress": int(done / max(total, 1) * 40),
+                        "message": f"Refining edges ({_label}): frame {done}/{total}",
+                    })
+
+                # `report` is bound as a default argument so each iteration's
+                # callback keeps its own reference rather than the loop variable.
+                def on_progress(done: int, total: int, _report=report) -> None:
+                    asyncio.run_coroutine_threadsafe(_report(done, total), loop)
+
+                await asyncio.to_thread(
+                    self.matting.refine_sequence,
+                    frame_paths=sequence,
+                    seed_mask=seed,
+                    output_dir=out_dir,
+                    start_index=seed_index,
+                    max_size=MATANYONE_MAX_SIZE,
+                    should_cancel=lambda: self.state.cancel_requested,
+                    on_progress=on_progress,
+                )
+                per_object_dirs.append(out_dir)
+
+            if not per_object_dirs:
+                return None
+
+            # Merge layers by taking the strongest alpha at each pixel.
+            def merge() -> None:
+                frame_names = sorted(
+                    {p.name for d in per_object_dirs for p in d.glob("*.png")}
+                )
+                for name in frame_names:
+                    accumulator: np.ndarray | None = None
+                    for directory in per_object_dirs:
+                        candidate = directory / name
+                        if not candidate.exists():
+                            continue
+                        matte = cv2.imread(str(candidate), cv2.IMREAD_GRAYSCALE)
+                        if matte is None:
+                            continue
+                        accumulator = matte if accumulator is None else np.maximum(accumulator, matte)
+                    if accumulator is not None:
+                        cv2.imwrite(str(merged_dir / name), accumulator)
+
+            await asyncio.to_thread(merge)
+            logger.info("MatAnyone refinement complete: %s", merged_dir)
+            return merged_dir
+        finally:
+            self.matting.unload()
+            MemoryManager.cleanup()
+
+    async def run_export(self, send_json, settings: dict[str, Any]) -> None:
+        """Composite frames and mattes into the requested output format.
 
         Args:
-            websocket (WebSocket): Client WebSocket connection.
-            settings (dict): Target resolution, background color, format, and FPS settings.
+            send_json: Coroutine accepting one dict, used to reach the client.
+            settings: Export options from the UI.
         """
-        export_format = settings.get("format", "mp4")
-        export_type = settings.get("type", "alpha")
-        bg_color_str = settings.get("bg_color", "green")
-        total_frames = settings.get("total_frames", self.state.total_frames or 100)
-        export_path_str = settings.get("export_path", "").strip()
-        resolution_str = settings.get("resolution", "original")
-        fps_str = settings.get("fps", "original")
-
-        try:
-            fps = float(fps_str) if fps_str != "original" else self.video_fps
-        except ValueError:
-            fps = self.video_fps
-
-        export_w, export_h = self.video_width, self.video_height
-        if resolution_str == "1080p":
-            export_w, export_h = 1920, 1080
-        elif resolution_str == "720p":
-            export_w, export_h = 1280, 720
-
-        # Background color BGR dictionary for solid color fills
-        bg_colors = {
-            "green": [0, 255, 0],
-            "blue": [255, 0, 0],
-            "black": [0, 0, 0],
-            "white": [255, 255, 255]
-        }
-        bgr_color = bg_colors.get(bg_color_str, [0, 255, 0])
-
         if not self.video_id:
-            await websocket.send_json({"status": "export_error", "message": "No video loaded."})
+            await send_json({"status": "export_error", "message": "No video is loaded."})
             return
 
-        output_filename = f"rotofox_export_{int(time.time())}.{export_format}"
-
-        if export_path_str:
-            export_dir = Path(export_path_str)
-        else:
-            export_dir = Path.home() / "Downloads" / "RotoFox Exports"
-
-        export_dir.mkdir(parents=True, exist_ok=True)
-        output_path = str(export_dir / output_filename)
-
-        video_dir = CacheManager.get_video_dir(self.video_id)
-        mask_dir = video_dir / "masks"
-
-        # Check if MatAnyone 2 checkpoint is present on local storage to activate edge refinement
-        checkpoints_dir = ModelManager.get_checkpoints_dir()
-        matanyone_checkpoint = checkpoints_dir / "matanyone2.pth"
-        use_matanyone = matanyone_checkpoint.exists()
-
-        refined_mask_dir = None
-
-        if use_matanyone:
-            try:
-                await websocket.send_json({
-                    "status": "export_progress",
-                    "progress": 0,
-                    "message": "Starting MatAnyone 2 edge refinement on GPU..."
-                })
-
-                # Copy raw frame JPGs to an isolated input directory
-                temp_input_dir = video_dir / "matanyone_input"
-                temp_input_dir.mkdir(exist_ok=True)
-                for f in video_dir.glob("*.jpg"):
-                    shutil.copy2(f, temp_input_dir / f.name)
-
-                temp_output_dir = video_dir / "matanyone_output"
-                temp_output_dir.mkdir(exist_ok=True)
-
-                # Dynamically load the third-party MatAnyone2 script
-                import sys
-                repo_root = Path(__file__).parent.parent.parent.parent
-                matanyone_src_dir = repo_root / "backend" / "third_party" / "MatAnyone2"
-                if str(matanyone_src_dir) not in sys.path:
-                    sys.path.insert(0, str(matanyone_src_dir))
-
-                from inference_matanyone2 import main as matanyone2_inference
-
-                masks_list = sorted(list(mask_dir.glob("*.png")))
-                if not masks_list:
-                    raise FileNotFoundError("No SAM 2 masks found for refinement.")
-                first_mask_path = masks_list[0]
-
-                # Unload SAM 2 to avoid VRAM Out Of Memory during MatAnyone 2 inference
-                self.predictor = None
-                if self.inference_state is not None:
-                    del self.inference_state
-                    self.inference_state = None
-                MemoryManager.cleanup()
-
-                # Run MatAnyone 2 inference on threadpool
-                await run_in_threadpool(
-                    matanyone2_inference,
-                    input_path=str(temp_input_dir),
-                    mask_path=str(first_mask_path),
-                    output_path=str(temp_output_dir),
-                    ckpt_path=str(matanyone_checkpoint),
-                    save_image=True,
-                    max_size=512
-                )
-
-                refined_mask_dir = temp_output_dir / "matanyone_input" / "pha"
-                print(f"AIEngine: MatAnyone 2 refinement completed. Using masks: {refined_mask_dir}")
-
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                print(f"AIEngine: WARNING: MatAnyone 2 refinement failed: {e}.")
-                use_matanyone = False
-
-        print(f"AI Engine: Exporting project to {output_path}...")
+        export_format = str(settings.get("format", "mp4")).lower()
+        export_type = str(settings.get("type", "alpha")).lower()
+        bg_color_name = str(settings.get("bg_color", "green")).lower()
+        resolution = str(settings.get("resolution", "original")).lower()
+        export_path_str = str(settings.get("export_path", "") or "").strip()
 
         try:
-            if export_format == "webm":
-                fourcc = cv2.VideoWriter_fourcc(*'vp80')
-            else:
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            fps = float(settings.get("fps", "original"))
+        except (TypeError, ValueError):
+            fps = self.video_fps
+        if fps <= 0:
+            fps = self.video_fps
 
-            writer = cv2.VideoWriter(output_path, fourcc, fps, (export_w, export_h))
+        video_dir = CacheManager.get_video_dir(self.video_id)
+        frame_paths = sorted(video_dir.glob("*.jpg"))
+        total_frames = len(frame_paths)
+        if total_frames == 0:
+            await send_json({"status": "export_error", "message": "No frames to export."})
+            return
 
-            for i in range(total_frames):
-                frame_path = video_dir / f"{i:05d}.jpg"
+        export_w, export_h = self.video_width, self.video_height
+        if resolution == "1080p":
+            export_w, export_h = 1920, 1080
+        elif resolution == "720p":
+            export_w, export_h = 1280, 720
 
-                if use_matanyone and refined_mask_dir is not None:
-                    current_mask_path = refined_mask_dir / f"{i:04d}.png"
-                else:
-                    current_mask_path = mask_dir / f"{i:05d}.png"
+        bg_colors = {
+            "green": (0, 255, 0),
+            "blue": (255, 0, 0),
+            "black": (0, 0, 0),
+            "white": (255, 255, 255),
+        }
+        bgr_color = np.array(bg_colors.get(bg_color_name, (0, 255, 0)), dtype=np.uint8)
 
-                out_frame = np.zeros((self.video_height, self.video_width, 3), dtype=np.uint8)
-
-                if frame_path.exists():
-                    img = cv2.imread(str(frame_path))
-                    if img is not None:
-                        out_frame = img
-
-                mask = np.zeros((self.video_height, self.video_width), dtype=np.uint8)
-                if current_mask_path.exists():
-                    m = cv2.imread(str(current_mask_path), cv2.IMREAD_UNCHANGED)
-                    if m is not None and len(m.shape) == 3 and m.shape[2] == 4:
-                        mask = m[:, :, 3]  # Get transparency channel
-                    elif m is not None:
-                        mask = cv2.cvtColor(m, cv2.COLOR_BGR2GRAY)
-
-                if export_w != self.video_width or export_h != self.video_height:
-                    out_frame = cv2.resize(out_frame, (export_w, export_h), interpolation=cv2.INTER_LINEAR)
-                    mask = cv2.resize(mask, (export_w, export_h), interpolation=cv2.INTER_NEAREST)
-
-                if export_type == "alpha":
-                    out_frame = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-                elif export_type == "solid":
-                    out_frame[mask < 127] = bgr_color
-                else:
-                    overlay = out_frame.copy()
-                    overlay[mask > 127] = [0, 0, 255]
-                    out_frame = cv2.addWeighted(overlay, 0.5, out_frame, 0.5, 0)
-
-                writer.write(out_frame)
-
-                # Report progress throttled to prevent flooding client
-                if i % max(1, total_frames // 50) == 0 or i == total_frames - 1:
-                    progress = int((i / max(total_frames, 1)) * 100)
-                    await websocket.send_json({
-                        "status": "export_progress",
-                        "progress": progress,
-                        "message": f"Rendering frame {i+1}/{total_frames}..."
-                    })
-                    await asyncio.sleep(0.001)
-
-            writer.release()
-
-            await websocket.send_json({
-                "status": "export_completed",
-                "file_path": str(Path(output_path).resolve())
+        export_dir = Path(export_path_str) if export_path_str else Path.home() / "Downloads" / "RotoFox Exports"
+        try:
+            export_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            await send_json({
+                "status": "export_error",
+                "message": f"Cannot write to the export folder {export_dir}: {exc}",
             })
-            print("AI Engine: Export completed.")
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print(f"AI Engine Export Error: {e}")
-            await websocket.send_json({"status": "export_error", "message": str(e)})
-        finally:
-            if use_matanyone:
-                try:
-                    temp_input_dir = video_dir / "matanyone_input"
-                    temp_output_dir = video_dir / "matanyone_output"
-                    if temp_input_dir.exists():
-                        shutil.rmtree(temp_input_dir)
-                    if temp_output_dir.exists():
-                        shutil.rmtree(temp_output_dir)
-                except Exception as e:
-                    print(f"AIEngine: Cleanup warning: {e}")
+            return
 
+        stem = f"rotofox_export_{int(time.time())}"
+        writer = None
+
+        try:
+            refined_dir = await self._refine_with_matanyone(send_json, video_dir)
+            alpha_dir = CacheManager.get_alpha_dir(self.video_id)
+
+            writer, needs_alpha = self._build_writer(
+                export_format, export_type, export_dir, stem, export_w, export_h, fps
+            )
+
+            report_every = max(1, total_frames // 50)
+
+            for index, frame_path in enumerate(frame_paths):
+                if self.state.cancel_requested:
+                    await send_json({"status": "export_cancelled"})
+                    return
+
+                frame = cv2.imread(str(frame_path), cv2.IMREAD_COLOR)
+                if frame is None:
+                    frame = np.zeros((self.video_height, self.video_width, 3), dtype=np.uint8)
+
+                name = f"{int(frame_path.stem):05d}.png"
+                matte = None
+                if refined_dir is not None:
+                    matte = self._read_matte(refined_dir / name, frame.shape[:2])
+                if matte is None:
+                    matte = self._read_matte(alpha_dir / name, frame.shape[:2])
+                if matte is None:
+                    matte = np.zeros(frame.shape[:2], dtype=np.uint8)
+
+                if (export_h, export_w) != frame.shape[:2]:
+                    frame = cv2.resize(frame, (export_w, export_h), interpolation=cv2.INTER_AREA)
+                    matte = cv2.resize(matte, (export_w, export_h), interpolation=cv2.INTER_LINEAR)
+
+                out_frame, out_alpha = self._composite(frame, matte, export_type, bgr_color)
+                writer.write(out_frame, out_alpha if needs_alpha or export_format == "png" else None)
+
+                if index % report_every == 0 or index == total_frames - 1:
+                    await send_json({
+                        "status": "export_progress",
+                        # Refinement occupies the first 40% of the bar.
+                        "progress": 40 + int((index + 1) / total_frames * 60)
+                        if refined_dir else int((index + 1) / total_frames * 100),
+                        "message": f"Rendering frame {index + 1}/{total_frames}...",
+                    })
+                    await asyncio.sleep(0)
+
+            writer.close()
+            writer = None
+
+            await send_json({
+                "status": "export_completed",
+                "file_path": str(Path(export_dir / stem).resolve()),
+            })
+            logger.info("Export complete: %s", export_dir / stem)
+
+        except ExportWriterError as exc:
+            logger.error("Export failed: %s", exc)
+            await send_json({"status": "export_error", "message": str(exc)})
+        except Exception as exc:  # noqa: BLE001 - surfaced to the user
+            logger.exception("Export failed: %s", exc)
+            await send_json({"status": "export_error", "message": str(exc)})
+        finally:
+            if writer is not None:
+                with contextlib.suppress(Exception):
+                    writer.close()
+            self.state.finish_export()
+            # Bring the tracking model back so the user can keep editing.
+            await asyncio.to_thread(self.reload_after_export)
+            await send_json({"status": "engine_ready"})
+
+    @staticmethod
+    def _composite(
+        frame: np.ndarray,
+        matte: np.ndarray,
+        export_type: str,
+        bgr_color: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Combine a frame and its matte according to the chosen render type.
+
+        Returns:
+            ``(bgr_frame, alpha)``. The alpha plane is always returned so
+            transparent formats can use it directly.
+        """
+        if export_type == "alpha":
+            # A true luma matte: white where the subject is, black elsewhere.
+            return cv2.cvtColor(matte, cv2.COLOR_GRAY2BGR), matte
+
+        if export_type == "transparent":
+            return frame, matte
+
+        if export_type == "solid":
+            normalised = (matte.astype(np.float32) / 255.0)[:, :, None]
+            background = np.empty_like(frame)
+            background[:] = bgr_color
+            blended = frame.astype(np.float32) * normalised + background.astype(np.float32) * (1.0 - normalised)
+            return blended.astype(np.uint8), matte
+
+        # overlay: tint the subject so the mask is visible against the plate
+        overlay = frame.copy()
+        overlay[matte > 127] = (0, 0, 255)
+        return cv2.addWeighted(overlay, 0.5, frame, 0.5, 0), matte

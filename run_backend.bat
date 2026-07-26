@@ -2,32 +2,38 @@
 title RotoFox - Backend Server
 color 0A
 
+REM Development launcher. Authentication is disabled so that a browser at
+REM localhost:1420 can connect without the desktop shell injecting a token.
+REM The packaged app always runs WITH authentication.
+
+set "ROOT=%~dp0"
+cd /d "%ROOT%backend" || (echo [ERROR] backend folder not found. & pause & exit /b 1)
+
 echo ============================================
-echo   RotoFox - Backend Server
+echo   RotoFox - Backend Server ^(development^)
 echo ============================================
 echo.
 
-:: Change to backend directory
-cd /d "%~dp0backend"
-
-:: Check if .venv exists
 if not exist ".venv\Scripts\python.exe" (
     echo [ERROR] Virtual environment not found at backend\.venv
-    echo Please run: python -m venv .venv
-    echo Then install dependencies: .venv\Scripts\pip install -r requirements.txt
+    echo.
+    echo Create it with:
+    echo   python -m venv .venv
+    echo   .venv\Scripts\pip install -r requirements.txt
+    echo.
+    echo Or run setup_and_build.bat to do everything automatically.
     echo.
     pause
     exit /b 1
 )
 
 echo [OK] Virtual environment found
-echo [OK] Starting backend server on http://127.0.0.1:8000
+echo [OK] Starting on http://127.0.0.1:8000
 echo.
-echo Press Ctrl+C to stop the server.
+echo Press Ctrl+C to stop.
 echo.
 
-:: Run backend
-.venv\Scripts\python main.py
+.venv\Scripts\python.exe main.py --no-auth --reload
 
 echo.
 echo [INFO] Server stopped.

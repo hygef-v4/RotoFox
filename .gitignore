@@ -1,58 +1,60 @@
-# Python
+# ── Python ────────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
 .env
 venv/
 env/
 .venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
 
-# App Specific Ignored Data
+# ── Application data ──────────────────────────────────────────────────────
 backend/checkpoints/*
 !backend/checkpoints/.gitkeep
-backend/cache_workspace/*
-!backend/cache_workspace/.gitkeep
+backend/cache_workspace/
+backend/logs/
+backend/runtime/
+backend/rotofox_config.json
 pretrained_models/
 scripts/pretrained_models/
 backend/third_party/
 *.pt
-*.pth  
+*.pth
 
-# Node
+# ── Node / frontend ───────────────────────────────────────────────────────
 node_modules/
 dist/
 dist-ssr/
 *.local
 
-# Tauri
+# ── Rust / Tauri ──────────────────────────────────────────────────────────
 frontend/src-tauri/target/
+# PyInstaller sidecar output (~2 GB). Rebuild with:
+#   backend/.venv/Scripts/python scripts/package_backend.py
+frontend/src-tauri/binaries/
 
-# OS
+# ── PyInstaller ───────────────────────────────────────────────────────────
+backend/build/
+backend/dist/
+# NOTE: rotofox-backend.spec is intentionally NOT ignored. It is the single
+# source of truth for how the backend is packaged and must stay in version
+# control. A blanket "*.spec" rule previously claimed to ignore it while the
+# file was in fact tracked, so edits appeared to vanish on commit.
+
+# ── OS ────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# Archives
+# ── Archives & binaries ───────────────────────────────────────────────────
 *.zip
-
-# Graphify
-graphify-out/
-
-# Agents
-.agents/
-
-# PyInstaller
-backend/build/
-backend/dist/
-*.spec
-
-# Executables & large binaries — never commit compiled artifacts
+*.7z
 *.exe
 *.dll
 *.pyd
 *.so
 
-# Tauri sidecar binaries (PyInstaller --onedir output, ~2GB+)
-# Rebuild with: backend/.venv/Scripts/python scripts/package_backend.py
-frontend/src-tauri/binaries/rotofox-backend/
-frontend/src-tauri/binaries/*.exe
+# ── Local tooling ─────────────────────────────────────────────────────────
+graphify-out/
+.agents/

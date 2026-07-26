@@ -39,13 +39,13 @@ Instead of frame-by-frame manual masking, RotoFox lets you **click once** (or dr
 |:---|:---|
 | 🖱️ **Interactive Point-and-Click** | Left-click (Include / green dot) to define the foreground object. Right-click (Exclude / red dot) to exclude background leaks. |
 | 🟦 **Box Selection Mode** | Draw a bounding box around the subject for fast, precise localization prompts. |
-| 🤖 **AI Propagation** | Streams mask predictions frame-by-frame across the timeline using SAM 2's Video Predictor memory bank. |
+| 🤖 **AI Propagation** | Streams mask predictions frame-by-frame across the timeline using SAM 2's Video Predictor memory bank, **forwards or backwards** from the current frame. |
 | 💇 **Hair-Level Matting** | Integrates MatAnyone 2 to refine boundaries, producing high-quality alpha matte edges. |
 | ↩️ **Undo / Redo History** | Full state history with keyboard shortcuts (`Ctrl+Z`, `Ctrl+Y`, `Ctrl+Shift+Z`) synced dynamically to the AI backend. |
 | 🎞️ **Multi-Object Timeline** | Visual timeline controller supporting up to 7 concurrent, color-coded mask layers with real-time feedback. |
 | ⌨️ **Editor-Friendly Shortcuts** | Navigation designed for standard NLE workflows (Arrow keys, Spacebar, Page Up/Down, Home/End). |
-| 📤 **Production-Ready Exports** | Export masks as transparent **ProRes 4444 (.mov)** or a **Luma Matte Sequence** (grayscale PNG images). |
-| 🔒 **100% Secure & Offline** | Zero external API calls, tracking, or telemetry — works fully offline. |
+| 📤 **Production-Ready Exports** | Transparent **ProRes 4444 (.mov)**, transparent **VP9 WebM**, **Luma Matte** video, **PNG sequence** (RGBA or matte), or a solid-colour composite. ProRes and transparent WebM require FFmpeg — see [Export formats](#-export-formats). |
+| 🔒 **Secure & Offline** | No telemetry and no cloud processing. The only network access is downloading model weights on first run; after that RotoFox works with no connection at all. The local API is protected by a per-session token. |
 
 ---
 
@@ -225,10 +225,11 @@ sequenceDiagram
 Double-click the [run_all.bat](run_all.bat) script at the project root. This launcher automatically spins up the Python backend server and the Vite dev server in separate terminal windows.
 
 ### Prerequisites
-- **OS**: Windows 10/11 or Ubuntu Linux
+- **OS**: Windows 10/11. (The backend is cross-platform and the Tauri sidecar now resolves per-platform binaries, but only the Windows build is packaged and tested today.)
 - **Python**: version `3.10` or higher (Python `3.11`/`3.12` recommended)
 - **Node.js**: version `18` or `20` (installed with npm)
-- **GPU**: NVIDIA GPU with **4 GB+ VRAM** (CUDA 11.8+ installed) is recommended. (Runs on CPU but is slow).
+- **GPU**: NVIDIA GPU with **4 GB+ VRAM** (CUDA 12.1) recommended. Runs on CPU, but 20-50x slower.
+- **FFmpeg** *(optional)*: needed for ProRes 4444 and transparent WebM export. `pip install imageio-ffmpeg` supplies one automatically, or put `ffmpeg.exe` next to `RotoFox.exe`.
 
 ---
 
@@ -248,18 +249,32 @@ python -m venv .venv
 # Linux/macOS:
 source .venv/bin/activate
 
-# Install dependencies
+# Install PyTorch with CUDA FIRST — a plain "pip install torch" resolves the
+# CPU-only wheel on Windows and inference becomes 20-50x slower
+pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+
+# Install the remaining dependencies
 pip install -r requirements.txt
 
-# Setup SAM 2
+# Install the SAM 2 framework (clone + editable install, no weights)
 python scripts/setup_sam2.py
 
-# Download AI Models (or download later via the Model Hub in the UI)
+# Download the model weights.
+#   interactive:      python scripts/setup_models.py
+#   non-interactive:  python scripts/setup_models.py --yes
+#   specific variant: python scripts/setup_models.py --sam small
 python scripts/setup_models.py
 
-# Run the backend
-python main.py
+# Run the backend in development mode
+#   --no-auth  lets a browser dev client connect without a session token
+#   --reload   restarts on source changes
+python main.py --no-auth --reload
 ```
+
+> **Which models do I need?** A **SAM 2.1** checkpoint is **required** — without
+> one, RotoFox cannot segment anything. **MatAnyone 2** is **optional**: it
+> refines hair and fine edges during export, and RotoFox falls back to the raw
+> SAM 2 masks when it is absent.
 
 #### 2. Frontend Setup
 ```bash
@@ -297,6 +312,61 @@ Double-clicking this file installs the desktop app. Running the installed shortc
 
 ---
 
+---
+
+## 🎬 Export formats
+
+| Format | Codec | Alpha | Requires FFmpeg | Best for |
+|:---|:---|:---:|:---:|:---|
+| **MOV** | ProRes 4444 | ✅ | Yes | Premiere / After Effects / Resolve |
+| **WebM** | VP9 (`yuva420p`) | ✅ | Yes | Web delivery |
+| **PNG Sequence** | PNG | ✅ | No | Maximum compatibility, lossless |
+| **MP4** | H.264 | ❌ | No* | Previews and review copies |
+
+<sub>*MP4 uses FFmpeg when available and falls back to OpenCV's `mp4v` encoder otherwise.</sub>
+
+**Render types**
+
+- **Transparent** — real alpha channel; the background is genuinely empty.
+- **Luma Matte** — pure white subject on pure black, for use as a track matte.
+- **Solid Color** — subject composited over green, blue, black or white.
+- **Video Overlay** — the mask tinted over the source plate, for checking coverage.
+
+If FFmpeg is missing, MOV and transparent WebM are refused with an explanatory
+message rather than producing a broken file. **PNG Sequence always works** and
+needs no external tools.
+
+---
+
+## 🔧 Troubleshooting
+
+**"No tracking model installed"**
+Open the Model Hub and download a SAM 2.1 checkpoint. Pick the one marked
+*Best for your PC* — it is chosen from your actual VRAM.
+
+**A model shows "Incomplete"**
+The download was interrupted. Click **Retry**. Partial files are detected by
+size and never mistaken for a working checkpoint.
+
+**"Another RotoFox window is already connected"**
+Only one editor may drive the AI engine at a time, because they would share one
+inference state. Close the other window.
+
+**Export says FFmpeg was not found**
+Either `pip install imageio-ffmpeg` inside `backend/.venv`, install FFmpeg and
+put it on PATH, or drop `ffmpeg.exe` next to `RotoFox.exe`. PNG Sequence export
+works without it.
+
+**Where are the logs?**
+`%LOCALAPPDATA%\RotoFox\logs\backend.log` for a packaged build, or
+`backend/logs/backend.log` when running from source.
+
+**Where is the cache?**
+`%LOCALAPPDATA%\RotoFox\cache_workspace` for a packaged build, or
+`backend/cache_workspace` from source. The three most recent sessions are kept.
+
+---
+
 ## ⌨️ Keyboard Shortcuts
 
 | Key Shortcut | Action |
@@ -307,6 +377,8 @@ Double-clicking this file installs the desktop app. Running the installed shortc
 | `Page Down` | Jump backward **10 frames** |
 | `Home` | Jump to **first frame** |
 | `End` | Jump to **last frame** |
+
+All shortcuts are global — they work anywhere in the window except while typing in a text field.
 | `Ctrl + Z` | **Undo** last prompt (point or box) |
 | `Ctrl + Y` or `Ctrl + Shift + Z` | **Redo** last undone action |
 
