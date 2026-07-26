@@ -1,0 +1,57 @@
+# Normalize line endings across platforms.
+# Without this, every checkout on Windows rewrites LF -> CRLF and `git diff`
+# reports thousands of phantom changes, making code review impossible.
+#
+# After adding this file, run once:
+#   git add --renormalize .
+#   git commit -m "chore: normalize line endings"
+
+* text=auto eol=lf
+
+# Windows-only scripts must keep CRLF or cmd.exe may mis-parse them
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Shell scripts must always be LF
+*.sh    text eol=lf
+
+# Explicit text types
+*.py    text eol=lf
+*.js    text eol=lf
+*.jsx   text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.rs    text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.toml  text eol=lf
+*.spec  text eol=lf
+
+# Binary — never touch, never diff
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.icns  binary
+*.svg   text eol=lf
+*.mp4   binary
+*.mov   binary
+*.pt    binary
+*.pth   binary
+*.exe   binary
+*.dll   binary
+*.so    binary
+*.pyd   binary
+*.zip   binary
+*.7z    binary
+
+# Lockfiles: keep in repo but hide from diff view
+package-lock.json  -diff
+Cargo.lock         -diff
+uv.lock            -diff
