@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Upload, RotateCcw } from 'lucide-react';
+import { ACCEPTED_VIDEO_ATTR, isAcceptedVideoFile } from '../../config';
 
 const DOT_RADIUS = 6;
-const ACCEPTED_VIDEO = 'video/mp4,video/webm,video/ogg,video/quicktime,video/x-matroska';
 
 /**
  * Interactive canvas: video frame, AI mask overlay, click points and box drags.
@@ -358,7 +358,7 @@ const VideoCanvas = ({
 
   // ── File import ─────────────────────────────────────────────────────────
   const importFile = useCallback((file) => {
-    if (!file || !file.type.startsWith('video/')) return;
+    if (!isAcceptedVideoFile(file)) return;
     // The caller owns the URL and is responsible for revoking the previous one.
     onVideoImport?.(URL.createObjectURL(file), file);
   }, [onVideoImport]);
@@ -539,7 +539,7 @@ const VideoCanvas = ({
 
             <input
               type="file"
-              accept={ACCEPTED_VIDEO}
+              accept={ACCEPTED_VIDEO_ATTR}
               ref={fileInputRef}
               onChange={handleFileChange}
               className="hidden"

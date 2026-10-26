@@ -70,6 +70,11 @@ if MATANYONE_SRC.is_dir():
         pass
 
 datas += collect_data_files("hydra", includes=["**/*.yaml"])
+try:
+    datas += collect_data_files("imageio_ffmpeg")
+    hiddenimports.append("imageio_ffmpeg")
+except Exception:
+    pass
 
 a = Analysis(
     [str(BACKEND_DIR / "main.py")],
@@ -87,6 +92,11 @@ a = Analysis(
         "IPython",
         "notebook",
         "pytest",
+        "PySide6",
+        "shiboken6",
+        "gradio",
+        "tensorboard",
+        "pandas",
     ],
     noarchive=False,
     optimize=0,

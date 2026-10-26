@@ -31,6 +31,7 @@ as a library caused four separate failures:
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import logging
 import sys
 from collections.abc import Callable, Iterator
@@ -60,6 +61,27 @@ def _matanyone_root() -> Path:
     # matting_engine.py -> services -> app -> backend
     backend_root = Path(__file__).resolve().parents[2]
     return backend_root / "third_party" / "MatAnyone2"
+
+
+def _matanyone_config_dir() -> Path | None:
+    """Locate MatAnyone 2's Hydra config directory in dev or PyInstaller builds."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        bundled = Path(meipass) / "matanyone2" / "config"
+        if bundled.is_dir():
+            return bundled
+
+    vendored = _matanyone_root() / "matanyone2" / "config"
+    if vendored.is_dir():
+        return vendored
+
+    spec = importlib.util.find_spec("matanyone2")
+    if spec and spec.origin:
+        pkg_cfg = Path(spec.origin).resolve().parent / "config"
+        if pkg_cfg.is_dir():
+            return pkg_cfg
+
+    return None
 
 
 @contextlib.contextmanager
@@ -106,8 +128,8 @@ class MattingEngine:
 
     @staticmethod
     def is_available() -> bool:
-        """Check whether the vendored MatAnyone 2 source tree is present."""
-        return (_matanyone_root() / "matanyone2").is_dir()
+        """Check whether MatAnyone 2 is available (vendored or bundled)."""
+        return _matanyone_config_dir() is not None
 
     def load(self, checkpoint_path: Path) -> None:
         """Load MatAnyone 2 weights onto the configured device.
@@ -123,20 +145,20 @@ class MattingEngine:
             return
 
         root = _matanyone_root()
-        if not root.is_dir():
-            raise MatAnyoneUnavailable(f"MatAnyone 2 source not found at {root}")
+        if root.is_dir() and str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+
+        config_dir = _matanyone_config_dir()
+        if config_dir is None:
+            raise MatAnyoneUnavailable(f"MatAnyone 2 config not found (checked {root})")
         if not Path(checkpoint_path).is_file():
             raise MatAnyoneUnavailable(f"MatAnyone 2 checkpoint not found: {checkpoint_path}")
-
-        if str(root) not in sys.path:
-            sys.path.insert(0, str(root))
 
         try:
             from hydra import compose
             from matanyone2.model.matanyone2 import MatAnyone2
             from omegaconf import open_dict
 
-            config_dir = root / "matanyone2" / "config"
             with _isolated_hydra(config_dir, "rotofox_matanyone"):
                 cfg = compose(config_name="eval_matanyone_config")
                 with open_dict(cfg):

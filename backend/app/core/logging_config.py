@@ -51,9 +51,10 @@ def setup_logging(level: int = logging.INFO) -> None:
     except OSError as exc:  # pragma: no cover - depends on filesystem permissions
         print(f"Warning: could not open log file: {exc}", file=sys.stderr)
 
-    stream_handler = logging.StreamHandler(sys.stderr)
-    stream_handler.setFormatter(formatter)
-    root.addHandler(stream_handler)
+    if sys.stderr is not None:
+        stream_handler = logging.StreamHandler(sys.stderr)
+        stream_handler.setFormatter(formatter)
+        root.addHandler(stream_handler)
 
     # These libraries log one line per request/frame at INFO, which drowns out
     # everything else during propagation.

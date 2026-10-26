@@ -109,3 +109,9 @@ class TestSessionToken:
         token = security.generate_session_token()
         path = security.runtime_dir() / security.TOKEN_FILE_NAME
         assert path.read_text(encoding="utf-8") == token
+
+    def test_preset_token_from_tauri_shell_is_preserved(self):
+        preset = "a" * 64
+        token = security.generate_session_token(preset)
+        assert token == preset
+        assert security.verify_token(preset)

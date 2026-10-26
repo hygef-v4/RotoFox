@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import logging
 import os
 import platform
@@ -35,12 +36,12 @@ from app.core.logging_config import tail_log
 from app.core.security import is_origin_allowed, verify_token
 from app.services.ai_engine import AIEngine
 from app.services.cache_manager import CacheManager
-from app.services.model_manager import DownloadCancelled, ModelManager
+from app.services.model_manager import TRACKING_MODEL_IDS, DownloadCancelled, ModelManager
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-ai_engine = AIEngine()
+ai_engine = AIEngine(auto_init=False)
 
 # Close codes
 CLOSE_POLICY_VIOLATION = 1008
@@ -139,6 +140,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     continue
                 session_video_id = video_id
                 try:
+                    await asyncio.to_thread(ai_engine.ensure_initialized)
                     if ai_engine.predictor is None:
                         await send({
                             "status": "error",
@@ -182,6 +184,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 async def do_download(_mid=model_id) -> None:
                     try:
                         await ModelManager.download_model_async(_mid, report)
+                        if ai_engine.predictor is None and _mid in TRACKING_MODEL_IDS:
+                            with contextlib.suppress(Exception):
+                                await asyncio.to_thread(ai_engine.load_model, _mid)
                         await send({"status": "download_completed", "model_id": _mid})
                     except DownloadCancelled:
                         await send({"status": "download_cancelled", "model_id": _mid})
