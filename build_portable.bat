@@ -13,6 +13,24 @@ set "BACKEND_DIST=%PROJECT_ROOT%backend\dist\rotofox-backend"
 set "FRONTEND_DIR=%PROJECT_ROOT%frontend"
 set "TAURI_RELEASE=%FRONTEND_DIR%\src-tauri\target\release"
 set "CHECKPOINTS_SRC=%PROJECT_ROOT%backend\checkpoints"
+set "VENV_PY=%PROJECT_ROOT%backend\.venv\Scripts\python.exe"
+
+:: ============================================================
+:: Step 0: Ensure Backend Sidecar is Packaged
+:: ============================================================
+if not exist "%BACKEND_DIST%\rotofox-backend.exe" (
+    echo [0/4] Packaging Python backend sidecar first...
+    if exist "%VENV_PY%" (
+        "%VENV_PY%" "%PROJECT_ROOT%backend\scripts\package_backend.py"
+    ) else (
+        python "%PROJECT_ROOT%backend\scripts\package_backend.py"
+    )
+    if errorlevel 1 (
+        echo [ERROR] Backend packaging failed!
+        pause
+        exit /b 1
+    )
+)
 
 :: ============================================================
 :: Step 1: Build Tauri Desktop App (lightweight, no heavy resources)
@@ -39,13 +57,18 @@ if exist "%DIST_DIR%" (
 )
 mkdir "%DIST_DIR%"
 
-:: Copy the Tauri app exe (the productName becomes the exe name)
+:: Copy the Tauri app exe
 echo Copying RotoFox.exe...
-copy /y "%TAURI_RELEASE%\frontend.exe" "%DIST_DIR%\RotoFox.exe" >nul
+if exist "%TAURI_RELEASE%\RotoFox.exe" (
+    copy /y "%TAURI_RELEASE%\RotoFox.exe" "%DIST_DIR%\RotoFox.exe" >nul
+) else (
+    copy /y "%TAURI_RELEASE%\frontend.exe" "%DIST_DIR%\RotoFox.exe" >nul
+)
 
-:: Copy the sidecar exe (Tauri looks for this specific name)
+:: Copy the sidecar exe under both naming conventions (Tauri v2 runtime + target triple)
 echo Copying sidecar backend...
-copy /y "%TAURI_RELEASE%\rotofox-backend.exe" "%DIST_DIR%\rotofox-backend-x86_64-pc-windows-msvc.exe" >nul
+copy /y "%BACKEND_DIST%\rotofox-backend.exe" "%DIST_DIR%\rotofox-backend.exe" >nul
+copy /y "%BACKEND_DIST%\rotofox-backend.exe" "%DIST_DIR%\rotofox-backend-x86_64-pc-windows-msvc.exe" >nul
 
 :: Copy _internal folder (PyTorch, CUDA DLLs, all Python dependencies)
 echo Copying backend runtime (_internal)... This may take a few minutes...
@@ -71,15 +94,6 @@ for %%f in (sam2.1_hiera_tiny.pt sam2.1_hiera_small.pt sam2.1_hiera_base_plus.pt
         copy /y "%CHECKPOINTS_SRC%\%%f" "%DIST_DIR%\checkpoints\" >nul
     )
 )
-
-:: Copy SAM 2 config files (needed by SAM 2 at runtime)
-if exist "%PROJECT_ROOT%backend\sam2_src\sam2\configs" (
-    echo   - SAM 2 config files
-    xcopy /e /i /h /y "%PROJECT_ROOT%backend\sam2_src\sam2\configs" "%DIST_DIR%\configs" >nul
-)
-
-:: Create a default config pointing to the local checkpoints dir
-echo {"checkpoints_dir": null} > "%DIST_DIR%\rotofox_config.json"
 
 :: ============================================================
 :: Step 4: Create Launcher
@@ -109,7 +123,7 @@ echo   %DIST_DIR%
 echo.
 echo   Contents:
 echo   - RotoFox.exe              (Desktop App)
-echo   - rotofox-backend-*.exe    (AI Backend Sidecar)
+echo   - rotofox-backend.exe      (AI Backend Sidecar)
 echo   - _internal\               (Python + PyTorch + CUDA runtime)
 echo   - checkpoints\             (AI Models)
 echo   - Start RotoFox.bat        (Launcher)

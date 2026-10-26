@@ -1,6 +1,8 @@
 import React, { useRef } from 'react';
 import { Upload, Download, Plus, Minus, Square, RotateCcw, RectangleHorizontal, Settings, Trash2, Undo, Redo, Cpu } from 'lucide-react';
 import logo from '../../assets/rotofox_logo.png';
+import { ACCEPTED_VIDEO_ATTR, isAcceptedVideoFile } from '../../config';
+
 const Toolbar = ({ clickMode, setClickMode, onVideoImport, onExportClick, onClearClicks, onUndoClick, onRedoClick, viewMode, setViewMode, objects, activeObjectId, setActiveObjectId, handleAddObject, handleDeleteObject, onSettingsClick, onModelHubClick }) => {
   const fileInputRef = useRef(null);
 
@@ -9,11 +11,12 @@ const Toolbar = ({ clickMode, setClickMode, onVideoImport, onExportClick, onClea
   };
 
   const handleFileChange = (e) => {
-    const file = e.target.files[0];
-    if (file && file.type.startsWith('video/')) {
+    const file = e.target.files?.[0];
+    if (isAcceptedVideoFile(file)) {
       const videoUrl = URL.createObjectURL(file);
       onVideoImport(videoUrl, file);
     }
+    e.target.value = '';
   };
 
   const aiTools = [
@@ -50,7 +53,7 @@ const Toolbar = ({ clickMode, setClickMode, onVideoImport, onExportClick, onClea
         <div className="space-y-2">
           <input 
             type="file" 
-            accept="video/mp4,video/webm,video/ogg,video/quicktime" 
+            accept={ACCEPTED_VIDEO_ATTR} 
             ref={fileInputRef} 
             onChange={handleFileChange} 
             className="hidden" 

@@ -13,7 +13,7 @@ import ModelHubModal from './components/modals/ModelHubModal';
 
 import { useAIEngine } from './hooks/useAIEngine';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
-import { MAX_OBJECTS, OBJECT_COLORS, apiUrl, authHeaders } from './config';
+import { MAX_OBJECTS, OBJECT_COLORS, apiUrl, authHeaders, initBackendConfig } from './config';
 
 const SETUP_DONE_KEY = 'rotofox_setup_done';
 
@@ -72,16 +72,18 @@ function App() {
 
   // ── First-run setup detection ───────────────────────────────────────────
   useEffect(() => {
-    if (localStorage.getItem(SETUP_DONE_KEY) === 'true') return undefined;
-
-    setShowSetupWizard(true);
+    const alreadyDone = localStorage.getItem(SETUP_DONE_KEY) === 'true';
+    if (!alreadyDone) {
+      setShowSetupWizard(true);
+    }
 
     let cancelled = false;
     let attempts = 0;
     const MAX_ATTEMPTS = 15;
     let timer = null;
 
-    const poll = () => {
+    const poll = async () => {
+      await initBackendConfig();
       fetch(apiUrl('/api/setup-status'), { headers: authHeaders() })
         .then((response) => response.json())
         .then((data) => {
@@ -90,6 +92,9 @@ function App() {
           if (!data.needs_setup) {
             localStorage.setItem(SETUP_DONE_KEY, 'true');
             setShowSetupWizard(false);
+          } else {
+            localStorage.removeItem(SETUP_DONE_KEY);
+            setShowSetupWizard(true);
           }
         })
         .catch(() => {

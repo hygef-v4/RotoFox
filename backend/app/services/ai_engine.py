@@ -24,6 +24,7 @@ import base64
 import contextlib
 import io
 import logging
+import threading
 import time
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -79,7 +80,9 @@ MATANYONE_MAX_SIZE = -1
 class AIEngine:
     """Orchestrates SAM 2 and MatAnyone 2 for video segmentation."""
 
-    def __init__(self) -> None:
+    def __init__(self, auto_init: bool = True) -> None:
+        self._init_lock = threading.Lock()
+        self._initialized = False
         self.state: EngineState = EngineState()
         self.predictor: Any | None = None
         self.inference_state: Any | None = None
@@ -94,7 +97,7 @@ class AIEngine:
         self.device: torch.device = self._select_device()
         self.matting: MattingEngine = MattingEngine(self.device)
 
-        if SAM2_AVAILABLE:
+        if auto_init and SAM2_AVAILABLE:
             self._init_model()
 
     # ── Device and precision ──────────────────────────────────────────────
@@ -136,8 +139,17 @@ class AIEngine:
 
     # ── Model lifecycle ───────────────────────────────────────────────────
 
+    def ensure_initialized(self) -> None:
+        """Load the default checkpoint once, safely across threads."""
+        if self._initialized or not SAM2_AVAILABLE:
+            return
+        with self._init_lock:
+            if not self._initialized:
+                self._init_model()
+
     def _init_model(self) -> None:
         """Load the best checkpoint present on disk, largest first."""
+        self._initialized = True
         found_model = next(
             (mid for mid in ("large", "base", "small", "tiny") if ModelManager.is_downloaded(mid)),
             None,
@@ -217,6 +229,7 @@ class AIEngine:
         Raises:
             RuntimeError: If no model is loaded or the frame cache is empty.
         """
+        self.ensure_initialized()
         if not SAM2_AVAILABLE or self.predictor is None:
             raise RuntimeError(
                 "No SAM 2 model is active. Download and activate one in the Model Hub."
@@ -481,8 +494,8 @@ class AIEngine:
         if obj_dir.exists():
             shutil.rmtree(obj_dir, ignore_errors=True)
 
-    def _clear_stale_non_cond_memory(self, start_frame: int) -> None:
-        """Drop cached non-conditioning outputs at or after a frame.
+    def _clear_stale_non_cond_memory(self, start_frame: int, reverse: bool = False) -> None:
+        """Drop cached non-conditioning outputs in the direction of propagation.
 
         Forces propagation to recompute those frames from the user's updated
         annotations rather than reusing tracking results from before the edit.
@@ -490,18 +503,24 @@ class AIEngine:
         if not self.inference_state:
             return
 
+        def should_clear(frame: int) -> bool:
+            return frame <= start_frame if reverse else frame >= start_frame
+
         cleared = 0
         for obj_state in self.inference_state.get("output_dict_per_obj", {}).values():
             non_cond = obj_state.get("non_cond_frame_outputs", {})
-            for frame in [f for f in list(non_cond) if f >= start_frame]:
+            for frame in [f for f in list(non_cond) if should_clear(f)]:
                 del non_cond[frame]
                 cleared += 1
 
         for tracked in self.inference_state.get("frames_tracked_per_obj", {}).values():
-            for frame in [f for f in list(tracked) if f >= start_frame]:
+            for frame in [f for f in list(tracked) if should_clear(f)]:
                 del tracked[frame]
 
-        logger.info("Cleared %d stale memory entries from frame %d", cleared, start_frame)
+        logger.info(
+            "Cleared %d stale memory entries from frame %d (reverse=%s)",
+            cleared, start_frame, reverse,
+        )
 
     # ── Propagation ───────────────────────────────────────────────────────
 
@@ -529,8 +548,8 @@ class AIEngine:
             logger.warning("Propagation requested while not tracking or with no state")
             return
 
-        if start_frame is not None and start_frame > 0 and not reverse:
-            self._clear_stale_non_cond_memory(start_frame)
+        if start_frame is not None and (reverse or start_frame > 0):
+            self._clear_stale_non_cond_memory(start_frame, reverse=reverse)
 
         logger.info(
             "Starting propagation from frame %s (%s)",
@@ -569,6 +588,13 @@ class AIEngine:
 
         task = loop.run_in_executor(None, worker)
 
+        total_timeline = max(self.state.total_frames or self.frame_count, 1)
+        if start_frame is not None:
+            expected_span = (start_frame + 1) if reverse else max(1, total_timeline - start_frame)
+        else:
+            expected_span = total_timeline
+        processed_count = 0
+
         try:
             while True:
                 item = await queue.get()
@@ -578,13 +604,13 @@ class AIEngine:
                 kind = item[0]
                 if kind == "frame":
                     _, frame_idx, obj_ids, overlay = item
+                    processed_count += 1
                     self.state.current_frame = frame_idx
-                    total = max(self.state.total_frames, 1)
                     await send_json({
                         "status": "tracking",
                         "frame": frame_idx,
                         "obj_ids": obj_ids,
-                        "progress": min(100, int((frame_idx + 1) / total * 100)),
+                        "progress": min(100, int(processed_count / max(expected_span, 1) * 100)),
                         "mask_base64": overlay,
                     })
                 elif kind == "cancelled":
@@ -943,14 +969,15 @@ class AIEngine:
                     })
                     await asyncio.sleep(0)
 
+            final_output_path = str(Path(writer.output_path).resolve())
             writer.close()
             writer = None
 
             await send_json({
                 "status": "export_completed",
-                "file_path": str(Path(export_dir / stem).resolve()),
+                "file_path": final_output_path,
             })
-            logger.info("Export complete: %s", export_dir / stem)
+            logger.info("Export complete: %s", final_output_path)
 
         except ExportWriterError as exc:
             logger.error("Export failed: %s", exc)

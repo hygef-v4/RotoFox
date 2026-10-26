@@ -7,10 +7,14 @@ and WebSocket routers, and starts Uvicorn bound to the loopback interface.
 from __future__ import annotations
 
 import argparse
+import asyncio
+import contextlib
 import json
 import logging
+import os
 import socket
 import sys
+from collections.abc import AsyncIterator
 
 import uvicorn
 from fastapi import FastAPI
@@ -26,9 +30,40 @@ logger = logging.getLogger(__name__)
 DEFAULT_PORT = 8000
 HOST = "127.0.0.1"
 
-app = FastAPI(title="RotoFox API", version="1.1.0")
 
-# Only the desktop shell and the Vite dev server may call this API. The previous
+@contextlib.asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Load the default SAM 2 checkpoint in the background after startup.
+
+    Running model initialization after Uvicorn binds the HTTP/WebSocket socket
+    lets the desktop UI connect in under two seconds instead of waiting for
+    PyTorch and CUDA to finish reading a ~900 MB checkpoint from disk.
+    """
+    from app.api.connection import manager
+    from app.api.websockets import ai_engine
+    from app.services.model_manager import ModelManager
+
+    async def _warm_up() -> None:
+        try:
+            await asyncio.to_thread(ai_engine.ensure_initialized)
+            if manager.is_connected:
+                info = ModelManager.get_system_info()
+                info["active_model"] = ai_engine.active_model_id
+                await manager.send({"status": "system_info", "system_info": info})
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Background model initialization failed: %s", exc)
+
+    warmup_task = asyncio.create_task(_warm_up())
+    try:
+        yield
+    finally:
+        if not warmup_task.done():
+            warmup_task.cancel()
+
+
+app = FastAPI(title="RotoFox API", version="1.1.0", lifespan=_lifespan)
+
+# Only the desktop shell and the dev server may call this API. The previous
 # configuration combined allow_origins=["*"] with allow_credentials=True — a
 # pairing the CORS specification forbids, and which invited every page the user
 # had open to POST to this local server.
@@ -49,15 +84,18 @@ app.include_router(websockets.router)
 def find_free_port(preferred: int = DEFAULT_PORT, attempts: int = 20) -> int:
     """Return a bindable port, starting at ``preferred``.
 
-    Hard-coding 8000 meant a single orphaned backend, or any unrelated program
-    holding that port, left the app stuck on its loading screen for thirty
-    seconds and then failing. The chosen port is published to the runtime
-    directory so the desktop shell can find it.
+    On Windows ``SO_REUSEADDR`` permits binding to a port that another process
+    is already listening on, which silently routes traffic to the old process.
+    We therefore use ``SO_EXCLUSIVEADDRUSE`` on Windows and only enable
+    ``SO_REUSEADDR`` on POSIX platforms.
     """
     for offset in range(attempts):
         candidate = preferred + offset
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 probe.bind((HOST, candidate))
                 return candidate
@@ -81,8 +119,12 @@ def publish_runtime_info(port: int, token: str) -> None:
 
 def main() -> None:
     """Parse arguments and run the ASGI server."""
+    env_port = int(os.getenv("ROTOFOX_PORT") or DEFAULT_PORT)
+    env_token = os.getenv("ROTOFOX_TOKEN") or ""
+
     parser = argparse.ArgumentParser(description="RotoFox backend")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Preferred port")
+    parser.add_argument("--port", type=int, default=env_port, help="Preferred port")
+    parser.add_argument("--token", type=str, default=env_token, help="Pre-shared session token")
     parser.add_argument("--no-auth", action="store_true", help="Disable the session token (development only)")
     parser.add_argument("--reload", action="store_true", help="Enable autoreload (development only)")
     args = parser.parse_args()
@@ -91,7 +133,7 @@ def main() -> None:
 
     token = ""
     if not args.no_auth:
-        token = generate_session_token()
+        token = generate_session_token(args.token)
     else:
         logger.warning("Session authentication is DISABLED (--no-auth)")
 

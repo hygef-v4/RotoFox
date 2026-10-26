@@ -37,13 +37,17 @@ echo       Upgrading pip...
 "%VENV_PY%" -m pip install --upgrade pip --quiet
 if errorlevel 1 (echo [ERROR] pip upgrade failed. & goto :fail)
 
-echo       Installing PyTorch with CUDA 12.1...
+echo       Installing PyTorch with CUDA...
 REM Installed first and explicitly: a plain "pip install torch" resolves the
 REM CPU-only wheel on Windows, which runs 20-50x slower.
-"%VENV_PY%" -m pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+"%VENV_PY%" -m pip install "torch>=2.5.1" "torchvision>=0.20.1" --index-url https://download.pytorch.org/whl/cu126
+if errorlevel 1 (
+    echo [WARN] CUDA 12.6 build failed. Trying CUDA 12.1...
+    "%VENV_PY%" -m pip install "torch>=2.5.1" "torchvision>=0.20.1" --index-url https://download.pytorch.org/whl/cu121
+)
 if errorlevel 1 (
     echo [WARN] CUDA build failed. Falling back to the CPU build ^(inference will be slow^).
-    "%VENV_PY%" -m pip install torch==2.5.1 torchvision==0.20.1
+    "%VENV_PY%" -m pip install "torch>=2.5.1" "torchvision>=0.20.1"
     if errorlevel 1 (echo [ERROR] Could not install PyTorch. & goto :fail)
 )
 

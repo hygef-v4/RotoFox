@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { WS_URL, apiUrl, authHeaders } from '../config';
+import { getWsUrl, initBackendConfig, apiUrl, authHeaders } from '../config';
 import { useMaskCache } from './useMaskCache';
 
 /**
@@ -274,7 +274,10 @@ export function useAIEngine() {
       }
     }
 
-    function connect() {
+    async function connect() {
+      if (!mounted) return;
+
+      await initBackendConfig();
       if (!mounted) return;
 
       if (wsRef.current) {
@@ -282,7 +285,7 @@ export function useAIEngine() {
         wsRef.current = null;
       }
 
-      const socket = new WebSocket(WS_URL);
+      const socket = new WebSocket(getWsUrl());
 
       socket.onopen = () => {
         wsRef.current = socket;
