@@ -31,6 +31,7 @@ dist-ssr/
 
 # ── Rust / Tauri ──────────────────────────────────────────────────────────
 frontend/src-tauri/target/
+frontend/src-tauri/resources/
 # PyInstaller sidecar output (~2 GB). Rebuild with:
 #   backend/.venv/Scripts/python scripts/package_backend.py
 frontend/src-tauri/binaries/
