@@ -7,15 +7,6 @@
     "core:default",
     "opener:default",
     "dialog:allow-open",
-    "shell:default",
-    {
-      "identifier": "shell:allow-spawn",
-      "allow": [
-        {
-          "name": "binaries/rotofox-backend",
-          "sidecar": true
-        }
-      ]
-    }
+    "shell:default"
   ]
 }

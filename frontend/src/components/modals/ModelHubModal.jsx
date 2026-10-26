@@ -1,5 +1,6 @@
 import React from 'react';
 import { AlertCircle, CheckCircle, Cpu, FolderOpen, X } from 'lucide-react';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
 /**
  * Hardware profile and model checkpoint manager.
@@ -183,11 +184,33 @@ export default function ModelHubModal({
             />
             <button
               type="button"
-              onClick={() => onOpenDirectory()}
-              className="bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/25 text-[10px] font-bold text-orange-400 px-2.5 py-1.5 rounded-lg transition-colors flex items-center gap-1.5"
-              title="Open this folder in your file manager"
+              onClick={async () => {
+                try {
+                  const selected = await openDialog({
+                    directory: true,
+                    multiple: false,
+                    defaultPath: systemInfo.checkpoints_dir || undefined,
+                    title: 'Select Model Checkpoints Folder',
+                  });
+                  if (selected && typeof selected === 'string') {
+                    onSetCheckpointsDir(selected);
+                  }
+                } catch (err) {
+                  console.warn('Folder dialog unavailable:', err);
+                }
+              }}
+              className="bg-orange-500/15 hover:bg-orange-500/25 border border-orange-500/30 text-[10px] font-bold text-orange-400 px-2.5 py-1.5 rounded-lg transition-colors flex items-center gap-1.5"
+              title="Browse for a folder"
             >
               <FolderOpen size={12} />
+              Browse
+            </button>
+            <button
+              type="button"
+              onClick={() => onOpenDirectory()}
+              className="bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-[10px] font-bold text-textPrimary px-2.5 py-1.5 rounded-lg transition-colors flex items-center gap-1.5"
+              title="Open this folder in your file manager"
+            >
               Open
             </button>
             <button

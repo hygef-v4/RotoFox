@@ -1,22 +1,26 @@
 import React, { useEffect, useState } from 'react';
-import { AlertCircle, CheckCircle, ChevronRight, Cpu, Download, Sparkles, Zap } from 'lucide-react';
+import {
+  AlertCircle,
+  CheckCircle,
+  ChevronRight,
+  Cpu,
+  Download,
+  FolderOpen,
+  HardDrive,
+  Sparkles,
+  Zap,
+} from 'lucide-react';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { listen } from '@tauri-apps/api/event';
 
 /**
- * First-run wizard.
+ * First-run production setup wizard.
  *
- * The required and optional models were previously inverted. MatAnyone 2 was
- * labelled "Required" and blocked the Continue button until it finished
- * downloading, while SAM 2.1 was labelled "Recommended" and offered a "Skip for
- * now" button.
- *
- * The code says the opposite. `ai_engine.run_export` checks whether the
- * MatAnyone checkpoint exists and falls back to raw SAM 2 masks when it does
- * not — it is genuinely optional. Without a SAM 2 checkpoint the predictor is
- * `None` and every canvas click raises, so a user who took the "Skip for now"
- * option landed in an application that could not do anything at all.
- *
- * Steps are therefore reordered: SAM 2.1 first and mandatory, MatAnyone second
- * and skippable.
+ * Step 0 lets the user choose the target storage directory on any drive and,
+ * if running from a fresh production installer without a pre-installed Python
+ * environment, automatically downloads and provisions the standalone Python 3.12
+ * + PyTorch (CUDA/CPU) + FFmpeg runtime inside that folder before proceeding to
+ * download SAM 2.1 and (optionally) MatAnyone 2 checkpoints.
  */
 
 const STEP_WELCOME = 0;
@@ -24,7 +28,7 @@ const STEP_SAM = 1;
 const STEP_MATANYONE = 2;
 const STEP_DONE = 3;
 
-const STEP_LABELS = ['Welcome', 'Tracking', 'Refinement', 'Done'];
+const STEP_LABELS = ['Storage & Engine', 'Tracking Model', 'Refinement', 'Done'];
 
 const vramColour = (vram, gpuAvailable) => {
   if (!gpuAvailable) return 'text-textSecondary';
@@ -34,14 +38,31 @@ const vramColour = (vram, gpuAvailable) => {
 };
 
 export default function SetupWizard({
+  runtimeStatus,
   setupStatus,
   downloadStatus,
   downloadModel,
   cancelDownload,
+  onInstallRuntime,
+  onSetCheckpointsDir,
   onComplete,
 }) {
   const [step, setStep] = useState(STEP_WELCOME);
   const [selectedSam, setSelectedSam] = useState(null);
+  const [storageDir, setStorageDir] = useState('');
+  const [isInstallingRuntime, setIsInstallingRuntime] = useState(false);
+  const [runtimeError, setRuntimeError] = useState('');
+  const [runtimeProgress, setRuntimeProgress] = useState({
+    progress: 0,
+    stage: 'Preparing...',
+    detail: '',
+  });
+  const [pendingAdvanceToSam, setPendingAdvanceToSam] = useState(false);
+
+  const runtimeInstalled = runtimeStatus?.installed ?? true;
+  const gpuAvailable = setupStatus?.gpu_available ?? runtimeStatus?.gpu_available ?? false;
+  const gpuName = setupStatus?.gpu_name ?? runtimeStatus?.gpu_name ?? 'CPU';
+  const totalVramGb = setupStatus?.total_vram_gb ?? runtimeStatus?.total_vram_gb ?? null;
 
   const samReady = setupStatus?.sam_ready ?? false;
   const matanyoneReady = setupStatus?.matanyone_ready ?? false;
@@ -51,8 +72,97 @@ export default function SetupWizard({
   const isDownloading = downloadStatus?.status === 'downloading';
 
   useEffect(() => {
+    if (!storageDir) {
+      if (runtimeStatus?.install_dir) {
+        setStorageDir(runtimeStatus.install_dir);
+      } else if (setupStatus?.checkpoints_dir) {
+        setStorageDir(setupStatus.checkpoints_dir);
+      }
+    }
+  }, [runtimeStatus?.install_dir, setupStatus?.checkpoints_dir, storageDir]);
+
+  useEffect(() => {
     if (!selectedSam && recommendedSam) setSelectedSam(recommendedSam);
   }, [recommendedSam, selectedSam]);
+
+  useEffect(() => {
+    if (pendingAdvanceToSam && setupStatus && !setupStatus.error) {
+      setPendingAdvanceToSam(false);
+      setIsInstallingRuntime(false);
+      setStep(STEP_SAM);
+    }
+  }, [pendingAdvanceToSam, setupStatus]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.__TAURI_INTERNALS__) return undefined;
+    let unlistenFn = null;
+    listen('runtime-install-progress', (event) => {
+      if (event?.payload) {
+        setRuntimeProgress({
+          progress: event.payload.progress ?? 0,
+          stage: event.payload.stage ?? 'Installing...',
+          detail: event.payload.detail ?? '',
+        });
+      }
+    }).then((fn) => {
+      unlistenFn = fn;
+    }).catch(() => {});
+
+    return () => {
+      if (unlistenFn) unlistenFn();
+    };
+  }, []);
+
+  const handleBrowseFolder = async () => {
+    try {
+      const selected = await openDialog({
+        directory: true,
+        multiple: false,
+        defaultPath: storageDir || undefined,
+        title: 'Select RotoFox AI Storage Folder',
+      });
+      if (selected && typeof selected === 'string') {
+        setStorageDir(selected);
+      }
+    } catch (err) {
+      console.warn('Folder dialog unavailable:', err);
+    }
+  };
+
+  const handleWelcomeContinue = async () => {
+    setRuntimeError('');
+    const trimmedDir = storageDir.trim();
+
+    if (!runtimeInstalled) {
+      setIsInstallingRuntime(true);
+      setRuntimeProgress({
+        progress: 2,
+        stage: 'Initializing Setup',
+        detail: `Target folder: ${trimmedDir || 'Default'}`,
+      });
+      try {
+        await onInstallRuntime?.(trimmedDir);
+        setPendingAdvanceToSam(true);
+      } catch (err) {
+        setIsInstallingRuntime(false);
+        setRuntimeError(typeof err === 'string' ? err : err?.message || 'Failed to install AI runtime.');
+      }
+      return;
+    }
+
+    if (trimmedDir && onSetCheckpointsDir) {
+      const targetCheckpoints = trimmedDir.toLowerCase().endsWith('checkpoints')
+        ? trimmedDir
+        : `${trimmedDir.replace(/[\\/]+$/, '')}\\checkpoints`;
+      onSetCheckpointsDir(targetCheckpoints);
+    }
+
+    if (setupStatus && !setupStatus.error) {
+      setStep(STEP_SAM);
+    } else {
+      setPendingAdvanceToSam(true);
+    }
+  };
 
   const renderProgress = () => (
     <div className="space-y-2">
@@ -77,49 +187,164 @@ export default function SetupWizard({
   );
 
   const renderWelcome = () => (
-    <div className="flex flex-col items-center text-center py-4">
-      <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-orange-500 to-orange-700 flex items-center justify-center mb-6 shadow-lg shadow-orange-500/20">
-        <Sparkles size={38} className="text-white" />
+    <div className="flex flex-col items-center text-center py-2">
+      <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-orange-500 to-orange-700 flex items-center justify-center mb-4 shadow-lg shadow-orange-500/20">
+        <Sparkles size={32} className="text-white" />
       </div>
-      <h2 className="text-2xl font-bold text-textPrimary mb-2">Welcome to RotoFox</h2>
-      <p className="text-sm text-textSecondary max-w-xs leading-relaxed mb-2">
-        Before you can start rotoscoping, RotoFox needs to install its AI models
-        on this machine.
-      </p>
-      <p className="text-xs text-textSecondary/60 max-w-xs leading-relaxed">
-        This is a one-time setup. Models are stored locally — no cloud, no tracking.
+      <h2 className="text-xl font-bold text-textPrimary mb-1.5">Welcome to RotoFox</h2>
+      <p className="text-xs text-textSecondary max-w-sm leading-relaxed mb-4">
+        Choose a folder on your PC where RotoFox will store its AI libraries,
+        model weights, and workspace cache. Everything runs 100% locally.
       </p>
 
-      <div className="mt-8 w-full max-w-xs space-y-2 text-left">
+      {/* Hardware Detected Badge */}
+      <div className="w-full bg-black/30 rounded-xl px-3.5 py-2.5 border border-white/[0.05] mb-3 flex items-center justify-between text-left">
+        <div className="flex items-center gap-2.5">
+          <Cpu size={15} className="text-orange-400 flex-shrink-0" />
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-textSecondary/60 font-bold">
+              Detected Hardware
+            </div>
+            <div className="text-xs font-semibold text-textPrimary">
+              {gpuName}
+              {totalVramGb ? (
+                <span className="text-orange-400 ml-1">({totalVramGb} GB VRAM)</span>
+              ) : null}
+            </div>
+          </div>
+        </div>
+        <span className={`text-[9px] font-bold uppercase px-2 py-0.5 rounded border ${
+          gpuAvailable
+            ? 'text-green-400 border-green-500/30 bg-green-500/10'
+            : 'text-orange-400 border-orange-500/30 bg-orange-500/10'
+        }`}
+        >
+          {gpuAvailable ? 'CUDA GPU' : 'CPU Mode'}
+        </span>
+      </div>
+
+      {/* Storage Directory Picker */}
+      <div className="w-full bg-black/30 rounded-xl p-3.5 border border-white/[0.05] mb-4 text-left">
+        <label className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-textSecondary/70 mb-2">
+          <HardDrive size={12} className="text-orange-400" />
+          AI Storage &amp; Runtime Folder
+        </label>
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={storageDir}
+            onChange={(e) => setStorageDir(e.target.value)}
+            disabled={isInstallingRuntime}
+            placeholder="e.g. D:\RotoFoxData"
+            className="flex-1 bg-[#1a1a1a] border border-white/[0.08] rounded-lg px-3 py-2 text-xs text-textPrimary font-mono focus:border-orange-500 focus:outline-none disabled:opacity-50"
+          />
+          <button
+            type="button"
+            onClick={handleBrowseFolder}
+            disabled={isInstallingRuntime}
+            className="bg-orange-500/15 hover:bg-orange-500/25 border border-orange-500/30 text-orange-400 text-xs font-semibold px-3 py-2 rounded-lg transition-colors flex items-center gap-1.5 flex-shrink-0 disabled:opacity-50"
+          >
+            <FolderOpen size={14} />
+            Browse
+          </button>
+        </div>
+        <p className="text-[10px] text-textSecondary/60 mt-1.5 leading-relaxed">
+          Tip: Pick a drive with at least 4 GB of free space (e.g. <code className="text-textSecondary">D:\RotoFox</code>).
+        </p>
+      </div>
+
+      {/* Components Checklist */}
+      <div className="w-full space-y-1.5 text-left mb-5">
         {[
-          { label: 'SAM 2.1 Tracking Model', required: true },
-          { label: 'MatAnyone 2 Edge Refinement', required: false },
+          {
+            label: `AI Engine Runtime (Python 3.12 + PyTorch ${gpuAvailable ? 'CUDA' : 'CPU'})`,
+            status: runtimeInstalled ? 'Installed' : 'Required',
+            installed: runtimeInstalled,
+            required: true,
+          },
+          {
+            label: 'SAM 2.1 Tracking Model',
+            status: samReady ? 'Installed' : 'Required',
+            installed: samReady,
+            required: true,
+          },
+          {
+            label: 'MatAnyone 2 Edge Refinement',
+            status: matanyoneReady ? 'Installed' : 'Optional',
+            installed: matanyoneReady,
+            required: false,
+          },
         ].map((item) => (
           <div
             key={item.label}
-            className="flex items-center gap-3 bg-black/25 rounded-lg px-3 py-2.5 border border-white/[0.04]"
+            className="flex items-center gap-3 bg-black/25 rounded-lg px-3 py-2 border border-white/[0.04]"
           >
-            <div className={`w-2 h-2 rounded-full flex-shrink-0 ${item.required ? 'bg-orange-500' : 'bg-green-500'}`} />
+            <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
+              item.installed ? 'bg-green-500' : item.required ? 'bg-orange-500' : 'bg-blue-500'
+            }`}
+            />
             <span className="text-xs text-textPrimary flex-1">{item.label}</span>
             <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${
-              item.required
-                ? 'text-red-400 border-red-500/30 bg-red-500/5'
-                : 'text-blue-400 border-blue-500/30 bg-blue-500/5'
+              item.installed
+                ? 'text-green-400 border-green-500/30 bg-green-500/10'
+                : item.required
+                  ? 'text-orange-400 border-orange-500/30 bg-orange-500/10'
+                  : 'text-blue-400 border-blue-500/30 bg-blue-500/10'
             }`}
             >
-              {item.required ? 'Required' : 'Optional'}
+              {item.status}
             </span>
           </div>
         ))}
       </div>
 
+      {isInstallingRuntime && (
+        <div className="w-full bg-orange-500/5 border border-orange-500/20 rounded-xl p-3.5 mb-4 text-left">
+          <div className="flex justify-between items-center text-xs font-semibold text-orange-400 mb-1.5">
+            <span>{runtimeProgress.stage}</span>
+            <span>{runtimeProgress.progress}%</span>
+          </div>
+          <div className="w-full bg-black/50 rounded-full h-2 overflow-hidden mb-2">
+            <div
+              className="bg-gradient-to-r from-orange-500 to-amber-400 h-full transition-all duration-300"
+              style={{ width: `${runtimeProgress.progress}%` }}
+            />
+          </div>
+          <p className="text-[10px] font-mono text-textSecondary truncate">
+            {runtimeProgress.detail || 'Setting up environment...'}
+          </p>
+        </div>
+      )}
+
+      {runtimeError && (
+        <div className="w-full flex items-start gap-2 text-xs text-red-400 bg-red-500/10 border border-red-500/25 rounded-xl px-3.5 py-2.5 mb-4 text-left">
+          <AlertCircle size={14} className="flex-shrink-0 mt-0.5" />
+          <span className="break-words">{runtimeError}</span>
+        </div>
+      )}
+
       <button
         type="button"
-        onClick={() => setStep(STEP_SAM)}
-        className="mt-8 w-full max-w-xs bg-orange-500 hover:bg-orange-600 active:scale-[0.98] text-white font-semibold py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-orange-500/20"
+        onClick={handleWelcomeContinue}
+        disabled={isInstallingRuntime}
+        className="w-full bg-orange-500 hover:bg-orange-600 active:scale-[0.98] text-white font-semibold py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-orange-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
       >
-        Get Started
-        <ChevronRight size={16} />
+        {isInstallingRuntime ? (
+          <>
+            <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            Installing AI Engine Runtime...
+          </>
+        ) : !runtimeInstalled ? (
+          <>
+            <Download size={16} />
+            Install AI Engine &amp; Continue
+          </>
+        ) : (
+          <>
+            Continue to Model Selection
+            <ChevronRight size={16} />
+          </>
+        )}
       </button>
     </div>
   );
@@ -138,12 +363,10 @@ export default function SetupWizard({
             </span>
           </h3>
           <p className="text-xs text-textSecondary mt-0.5 leading-relaxed">
-            Segments and tracks your subject. RotoFox cannot generate any mask
-            without it. Detected hardware:{' '}
-            <span className="text-textPrimary font-semibold">{setupStatus?.gpu_name ?? 'CPU'}</span>
-            {setupStatus?.total_vram_gb ? (
-              <span className="text-orange-400 font-semibold ml-1">({setupStatus.total_vram_gb} GB VRAM)</span>
-            ) : null}
+            Segments and tracks your subject. Saving into:{' '}
+            <span className="text-textPrimary font-mono text-[10px]">
+              {setupStatus?.checkpoints_dir || storageDir}
+            </span>
           </p>
         </div>
       </div>
@@ -151,7 +374,7 @@ export default function SetupWizard({
       <div className="space-y-2 max-h-[260px] overflow-y-auto pr-1">
         {samModels.map((model) => {
           const isSelected = selectedSam === model.id;
-          const fits = !setupStatus?.total_vram_gb || model.vram_req <= setupStatus.total_vram_gb;
+          const fits = !totalVramGb || model.vram_req <= totalVramGb;
 
           return (
             <button
@@ -192,7 +415,7 @@ export default function SetupWizard({
               <div className="flex gap-3 mt-1.5 text-[9px] font-mono text-textSecondary/70 flex-wrap">
                 <span>{model.speed}</span>
                 <span>•</span>
-                <span className={vramColour(model.vram_req, setupStatus?.gpu_available)}>
+                <span className={vramColour(model.vram_req, gpuAvailable)}>
                   VRAM: {model.vram_req} GB
                 </span>
                 <span>•</span>
@@ -322,6 +545,7 @@ export default function SetupWizard({
 
       <div className="w-full max-w-xs space-y-2 text-left mb-8">
         {[
+          { label: 'AI Engine Runtime', done: runtimeInstalled },
           { label: 'SAM 2.1 Tracking', done: samReady },
           { label: 'MatAnyone 2 Refinement', done: matanyoneReady },
         ].map((item) => (
@@ -353,22 +577,25 @@ export default function SetupWizard({
     </div>
   );
 
+  // Show spinner only when runtime IS installed, we're past step 0, and backend hasn't responded yet
+  const waitingForBackend = runtimeInstalled && !setupStatus && step !== STEP_WELCOME;
+
   return (
     <div className="fixed inset-0 bg-black/90 flex items-center justify-center z-[100] backdrop-blur-sm">
-      <div className="bg-[#111] border border-white/[0.06] rounded-2xl w-[520px] max-h-[90vh] overflow-y-auto shadow-2xl">
-        {!setupStatus && (
+      <div className="bg-[#111] border border-white/[0.06] rounded-2xl w-[540px] max-h-[92vh] overflow-y-auto shadow-2xl">
+        {waitingForBackend && (
           <div className="flex flex-col items-center justify-center py-16 px-8 text-center">
             <div className="w-14 h-14 rounded-2xl bg-orange-500/10 border border-orange-500/20 flex items-center justify-center mb-5">
               <div className="w-6 h-6 border-2 border-orange-500/30 border-t-orange-500 rounded-full animate-spin" />
             </div>
             <h3 className="text-base font-bold text-textPrimary mb-1">Starting AI Core…</h3>
             <p className="text-xs text-textSecondary max-w-xs leading-relaxed">
-              Waiting for the backend to initialise. This can take up to 30 seconds on first launch.
+              Waiting for the local AI backend to initialise. This takes a few seconds.
             </p>
           </div>
         )}
 
-        {setupStatus?.error && (
+        {setupStatus?.error && step !== STEP_WELCOME && (
           <div className="flex flex-col items-center justify-center py-16 px-8 text-center">
             <div className="w-14 h-14 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mb-5">
               <AlertCircle size={24} className="text-red-500" />
@@ -385,7 +612,7 @@ export default function SetupWizard({
           </div>
         )}
 
-        {setupStatus && !setupStatus.error && (
+        {!waitingForBackend && !(setupStatus?.error && step !== STEP_WELCOME) && (
           <>
             <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-white/[0.04]">
               {STEP_LABELS.map((label, index) => (
@@ -405,7 +632,7 @@ export default function SetupWizard({
                     {label}
                   </span>
                   {index < STEP_LABELS.length - 1 && (
-                    <div className={`w-8 h-px mx-1 ${index < step ? 'bg-green-500/50' : 'bg-white/[0.06]'}`} />
+                    <div className={`w-6 h-px mx-0.5 ${index < step ? 'bg-green-500/50' : 'bg-white/[0.06]'}`} />
                   )}
                 </div>
               ))}

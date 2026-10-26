@@ -52,10 +52,15 @@ def bundle_dir() -> Path:
 def app_data_dir() -> Path:
     """Writable per-user directory for caches, logs and configuration.
 
+    If ``ROTOFOX_DATA_DIR`` is set by the desktop shell (pointing at the storage
+    folder chosen by the user during setup), that directory is used directly.
     In development this is the backend source root so the existing developer
     workflow (inspecting ``backend/cache_workspace``) keeps working unchanged.
     """
-    if not is_frozen():
+    custom_data_dir = os.getenv("ROTOFOX_DATA_DIR", "").strip()
+    if custom_data_dir:
+        base = Path(custom_data_dir).expanduser().resolve()
+    elif not is_frozen():
         base = bundle_dir()
     elif sys.platform == "win32":
         base = Path(os.getenv("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / APP_NAME
@@ -97,11 +102,15 @@ def config_file() -> Path:
 def default_checkpoints_dir() -> Path:
     """Directory searched for model weights when no custom folder is configured.
 
-    Packaged builds look next to the executable first, because the portable
-    builder copies ``checkpoints/`` there. If that location is not writable
-    (e.g. installed under Program Files) the per-user data directory is used
-    instead so downloads from the Model Hub still succeed.
+    When ``ROTOFOX_DATA_DIR`` is active, weights live inside
+    ``<ROTOFOX_DATA_DIR>/checkpoints``. Otherwise packaged builds look next to
+    the executable first (for portable builds) and fall back to ``app_data_dir()``.
     """
+    if os.getenv("ROTOFOX_DATA_DIR", "").strip():
+        custom = app_data_dir() / "checkpoints"
+        custom.mkdir(parents=True, exist_ok=True)
+        return custom
+
     candidate = bundle_dir() / "checkpoints"
     try:
         candidate.mkdir(parents=True, exist_ok=True)

@@ -38,6 +38,37 @@ export async function initBackendConfig() {
   return readInjectedConfig();
 }
 
+/**
+ * Query whether the local Python/PyTorch AI runtime is installed and running.
+ */
+export async function getRuntimeStatus() {
+  if (typeof window !== 'undefined' && window.__TAURI_INTERNALS__) {
+    try {
+      return await invoke('get_runtime_status');
+    } catch {
+      // Fall through to default below
+    }
+  }
+  return {
+    installed: true,
+    running: true,
+    install_dir: '',
+    gpu_available: false,
+    gpu_name: 'CPU',
+    total_vram_gb: null,
+  };
+}
+
+/**
+ * Install the standalone Python + PyTorch runtime into `installDir` and start the backend.
+ */
+export async function installAiRuntime(installDir) {
+  if (typeof window !== 'undefined' && window.__TAURI_INTERNALS__) {
+    return invoke('install_ai_runtime', { installDir });
+  }
+  return getRuntimeStatus();
+}
+
 const initial = readInjectedConfig();
 export const BACKEND_HOST = initial.host;
 export const BACKEND_PORT = initial.port;

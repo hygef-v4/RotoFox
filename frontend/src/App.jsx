@@ -13,7 +13,15 @@ import ModelHubModal from './components/modals/ModelHubModal';
 
 import { useAIEngine } from './hooks/useAIEngine';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
-import { MAX_OBJECTS, OBJECT_COLORS, apiUrl, authHeaders, initBackendConfig } from './config';
+import {
+  MAX_OBJECTS,
+  OBJECT_COLORS,
+  apiUrl,
+  authHeaders,
+  getRuntimeStatus,
+  initBackendConfig,
+  installAiRuntime,
+} from './config';
 
 const SETUP_DONE_KEY = 'rotofox_setup_done';
 
@@ -49,6 +57,7 @@ function App() {
   // ── Modals ──────────────────────────────────────────────────────────────
   const [activeModal, setActiveModal] = useState(null);  // export | settings | modelhub
   const [showSetupWizard, setShowSetupWizard] = useState(false);
+  const [runtimeStatus, setRuntimeStatus] = useState(null);
   const [setupStatus, setSetupStatus] = useState(null);
   const [showTrackingToast, setShowTrackingToast] = useState(false);
 
@@ -70,16 +79,11 @@ function App() {
   const trackingToastTimer = useRef(null);
   const wasTracking = useRef(false);
 
-  // ── First-run setup detection ───────────────────────────────────────────
-  useEffect(() => {
-    const alreadyDone = localStorage.getItem(SETUP_DONE_KEY) === 'true';
-    if (!alreadyDone) {
-      setShowSetupWizard(true);
-    }
-
+  // ── First-run setup & runtime detection ─────────────────────────────────
+  const pollSetupStatus = useCallback(() => {
     let cancelled = false;
     let attempts = 0;
-    const MAX_ATTEMPTS = 15;
+    const MAX_ATTEMPTS = 20;
     let timer = null;
 
     const poll = async () => {
@@ -102,7 +106,7 @@ function App() {
           attempts += 1;
           if (attempts >= MAX_ATTEMPTS) {
             setSetupStatus({
-              error: 'The AI backend did not start within 30 seconds. '
+              error: 'The AI backend did not start within 40 seconds. '
                    + 'Check that no other copy of RotoFox is running, then restart the app.',
             });
           } else {
@@ -114,6 +118,42 @@ function App() {
     poll();
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, []);
+
+  useEffect(() => {
+    let cleanupPoll = null;
+    let cancelled = false;
+
+    async function checkInitialState() {
+      const rt = await getRuntimeStatus();
+      if (cancelled) return;
+      setRuntimeStatus(rt);
+
+      if (!rt.installed) {
+        localStorage.removeItem(SETUP_DONE_KEY);
+        setShowSetupWizard(true);
+        return;
+      }
+
+      const alreadyDone = localStorage.getItem(SETUP_DONE_KEY) === 'true';
+      if (!alreadyDone) {
+        setShowSetupWizard(true);
+      }
+      cleanupPoll = pollSetupStatus();
+    }
+
+    checkInitialState();
+    return () => {
+      cancelled = true;
+      if (cleanupPoll) cleanupPoll();
+    };
+  }, [pollSetupStatus]);
+
+  const handleInstallRuntime = useCallback(async (installDir) => {
+    const updated = await installAiRuntime(installDir);
+    setRuntimeStatus(updated);
+    pollSetupStatus();
+    return updated;
+  }, [pollSetupStatus]);
 
   // Refresh status whenever the wizard is reopened during a session.
   useEffect(() => {
@@ -232,7 +272,7 @@ function App() {
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-background">
-      {!engine.isConnected && (
+      {!engine.isConnected && !showSetupWizard && (
         <LoadingScreen isConnected={engine.isConnected} error={engine.connectionError} />
       )}
 
@@ -385,10 +425,13 @@ function App() {
 
         {showSetupWizard && (
           <SetupWizard
+            runtimeStatus={runtimeStatus}
             setupStatus={setupStatus}
             downloadStatus={engine.downloadStatus}
             downloadModel={engine.downloadModel}
             cancelDownload={engine.cancelDownload}
+            onInstallRuntime={handleInstallRuntime}
+            onSetCheckpointsDir={engine.setCheckpointsDir}
             onComplete={() => {
               localStorage.setItem(SETUP_DONE_KEY, 'true');
               setShowSetupWizard(false);
